@@ -1,0 +1,36 @@
+# Reusable dependency-review workflow.
+#
+# Fails the PR if any dependency change introduces a vulnerability at
+# `moderate` severity or higher. Posts a summary comment on the PR only when
+# the check fails, to avoid noise on the common (clean) case.
+#
+# PUBLIC HOST. This is the public-repo-consumable copy of the reusable that
+# also lives in the private `devops-excellence` repo. GitHub does not allow a
+# PUBLIC repo to call a reusable workflow in a PRIVATE repo (the call fails at
+# startup with 0 jobs), so public org repos must reference THIS host. See
+# devops-excellence ADR-038 and issue #189. This reusable takes no secrets and
+# references no private-repo actions, so it is fully auth-safe for public
+# callers.
+
+name: Reusable Dependency Review
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure

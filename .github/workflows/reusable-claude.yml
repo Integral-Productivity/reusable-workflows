@@ -1,0 +1,147 @@
+# Reusable Claude on-demand bot workflow.
+#
+# Runs `anthropics/claude-code-action@v1` so a maintainer can summon Claude in
+# an issue, PR review, or comment by writing `@claude ...`. The reusable
+# centralizes the action version, permissions, and `claude_args` configuration
+# so every consumer repo behaves consistently.
+#
+# PUBLIC HOST. This is the public-repo-consumable copy of the reusable that
+# also lives in the private `devops-excellence` repo. GitHub does not allow a
+# PUBLIC repo to call a reusable workflow in a PRIVATE repo (the call fails at
+# startup with 0 jobs), so public org repos must reference THIS host, not
+# devops-excellence. See devops-excellence ADR-038 and issue #189. This copy
+# is auth-safe for public callers: its only secret, CLAUDE_CODE_OAUTH_TOKEN,
+# is an org secret with visibility:all, and it references no private-repo
+# composite actions.
+#
+# IMPORTANT — the caller is responsible for two things this reusable cannot
+# do on its own:
+#
+#   1. **The event triggers.** Reusable workflows can't change which events
+#      fire them, so the caller must declare the `on:` block with
+#      `issue_comment`, `pull_request_review_comment`, `issues`, and
+#      `pull_request_review`.
+#   2. **The `@claude` mention gate.** This reusable does NOT check whether
+#      the comment actually mentions @claude. Without an `if:` on the
+#      caller's job, Claude would run on EVERY comment. Every caller must
+#      include the standard gate, verbatim.
+#   3. **A top-level `permissions:` block.** A workflow_call reusable can
+#      only USE permissions that the caller has GRANTED, so the caller must
+#      mirror this file's `permissions:` block (or grant more). Org/repo
+#      defaults are typically `contents: read` only — without an explicit
+#      block, the validator rejects this call at startup with the
+#      "is requesting X, is only allowed Y" error.
+#
+#        permissions:
+#          contents: write
+#          pull-requests: write
+#          issues: write
+#          id-token: write
+#          actions: read
+#
+#        jobs:
+#          claude:
+#            if: |
+#              (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+#              (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+#              (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+#              (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+#            uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-claude.yml@main
+#            secrets:
+#              CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#
+# PUBLIC callers reference this host (reusable-workflows). PRIVATE org repos
+# may continue to reference the devops-excellence copy. Copy the caller
+# pattern from a consumer repo and point `uses:` at the host matching the
+# caller's visibility.
+#
+# The upstream action (`anthropics/claude-code-action`) is covered by the
+# `anthropics/*` allow-list entry in ADR-012.
+
+name: Reusable Claude
+
+on:
+  workflow_call:
+    inputs:
+      prompt:
+        description: 'Optional custom prompt. When empty (default), Claude follows the instructions in the @claude-tagged comment.'
+        required: false
+        type: string
+        default: ''
+      claude-args:
+        description: 'Optional extra args forwarded to claude_args (e.g. "--allowed-tools Bash(gh pr *)").'
+        required: false
+        type: string
+        default: ''
+      additional-permissions:
+        description: 'Additional permissions block forwarded to the action. Default grants `actions: read` so Claude can read CI results.'
+        required: false
+        type: string
+        default: |
+          actions: read
+      fetch-depth:
+        description: 'Depth of the checkout. 1 is sufficient for the action.'
+        required: false
+        type: number
+        default: 1
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        # Declared `required: false` so the precheck step below can run and emit a
+        # named ::warning:: when the org secret is missing. `required: true` causes
+        # GitHub's workflow_call validator to reject an empty value at startup,
+        # producing the opaque 0-second startup_failure that bit us when PR #39
+        # landed before the secret was provisioned. The precheck is the real gate.
+        description: 'OAuth token for anthropics/claude-code-action. Provisioned org-wide; see devops-excellence CLAUDE.md.'
+        required: false
+
+permissions:
+  # The @claude mention bot pushes commits to `claude/*` branches and
+  # posts/edits comments on PRs and issues, so it needs write access on
+  # contents, pull-requests, and issues. id-token is for OIDC; actions:read
+  # lets the bot read CI results when reasoning about a PR. Org branch
+  # protection still prevents direct pushes to `main`.
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+jobs:
+  claude:
+    name: Claude
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify CLAUDE_CODE_OAUTH_TOKEN is configured
+        id: creds
+        # Mirrors the precheck pattern in reusable-auto-merge.yml. Without this,
+        # a missing org secret surfaces as a 0-second startup_failure with no logs
+        # — the failure mode that bit us when PR #39 landed before the secret was
+        # provisioned. Emitting a named warning here turns "the action doesn't
+        # seem active" into a clear remediation hint for any consumer-repo
+        # maintainer adopting this reusable.
+        env:
+          OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -z "${OAUTH_TOKEN:-}" ]; then
+            echo "::warning::CLAUDE_CODE_OAUTH_TOKEN is missing from the Actions secrets scope. Fix: run 'claude setup-token' locally to mint a long-lived token, then: gh secret set CLAUDE_CODE_OAUTH_TOKEN --org Integral-Productivity --visibility all"
+            echo "::warning::Skipping Claude — required secret is missing. See warning above."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out repo
+        if: steps.creds.outputs.ready == 'true'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - name: Run Claude Code
+        id: claude
+        if: steps.creds.outputs.ready == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: ${{ inputs.additional-permissions }}
+          prompt: ${{ inputs.prompt }}
+          claude_args: ${{ inputs.claude-args }}
