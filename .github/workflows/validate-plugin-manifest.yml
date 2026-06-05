@@ -1,0 +1,85 @@
+# Reusable plugin-manifest validation gate (devops-excellence ADR-038).
+#
+# Gates every PR on `claude plugin validate <manifest>` so a manifest that is
+# valid JSON but invalid against the Claude Code plugin schema cannot reach
+# `main`. A manifest can pass `jq` and human review, get listed, and only fail
+# at `claude plugin install` — this catches that class of error in CI.
+#
+# `claude plugin validate` is a local, auth-free schema check (no API key, no
+# login), so it runs on a clean runner with no secrets.
+#
+# This workflow lives in a PUBLIC repo on purpose: GitHub does not allow a
+# public repository to call a reusable workflow stored in a private/internal
+# repository, so the *-claude-plugin repos (public) cannot consume the copy in
+# the private devops-excellence repo. This public host is the canonical home.
+#
+# Usage in a consumer repo (one caller per repo):
+#
+#   name: Validate plugin manifest
+#   on:
+#     pull_request:
+#       branches: [main]
+#     push:
+#       branches: [main]
+#   permissions:
+#     contents: read
+#   jobs:
+#     validate:
+#       uses: Integral-Productivity/reusable-workflows/.github/workflows/validate-plugin-manifest.yml@main
+#       # with:
+#       #   manifest-path: .claude-plugin/marketplace.json   # default is plugin.json
+#
+# Inputs
+# ------
+#
+#   manifest-path  (default: .claude-plugin/plugin.json)
+#     Path to the manifest to validate, relative to the repo root. Plugin
+#     repos use the default; the marketplace repo passes
+#     `.claude-plugin/marketplace.json`.
+#
+# Permissions required from caller
+# --------------------------------
+#
+# The caller MUST grant the permissions this file declares, since reusable
+# workflows can only use permissions the caller granted:
+#
+#   permissions:
+#     contents: read
+#
+# `contents: read` is all that is needed — the only privileged step is the
+# checkout. `validate` makes no network calls and uses no token.
+
+name: Reusable validate plugin manifest
+
+on:
+  workflow_call:
+    inputs:
+      manifest-path:
+        description: "Path to the manifest to validate, relative to the repo root."
+        required: false
+        type: string
+        default: .claude-plugin/plugin.json
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Latest CLI on purpose: validate against the current plugin schema so new
+      # schema requirements are caught, not pinned away. Pin here if a CLI
+      # release ever destabilises the gate.
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+      # Pass the input via env rather than interpolating ${{ inputs.* }} directly
+      # into the run line, per GitHub Actions script-injection guidance: the
+      # runner then treats the value as data, not as shell to evaluate.
+      - name: Validate manifest
+        env:
+          MANIFEST_PATH: ${{ inputs.manifest-path }}
+        run: claude plugin validate "$MANIFEST_PATH"
