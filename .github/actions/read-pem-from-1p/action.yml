@@ -1,0 +1,95 @@
+# Composite action: read a managed-identity App's PEM from 1Password.
+#
+# PUBLIC COPY. This is the public-repo-consumable copy of the composite action
+# that also lives in the private `devops-excellence` repo
+# (.github/actions/read-pem-from-1p). GitHub does not allow a PUBLIC repo to
+# call a composite action stored in a PRIVATE repo (the call fails at startup
+# the same way a private reusable workflow does), so the public
+# `reusable-auto-merge.yml` here references THIS copy, not the devops-excellence
+# one. See devops-excellence ADR-045 (the public 1P-token routing decision) and
+# ADR-038 (the public-host pattern). This copy is logic-identical to the private
+# original; the `op` CLI install is SHA-pinned and the action holds no secret
+# values — it only `op read`s the item the caller's token is scoped to.
+#
+# Per ADR-003 in Integral-Productivity/ip-bots, 1Password Business is the sole
+# system-of-record for managed-identity App PEMs. This action centralizes the
+# read so every workflow that mints an App token uses the same code path —
+# install op CLI (pinned by SHA), read the named vault item, mask the value
+# line-by-line, expose as a step output.
+#
+# Usage (from the public reusable-auto-merge.yml):
+#
+#   - name: Read PEM from 1P
+#     id: pem
+#     uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+#     with:
+#       op-service-account-token: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
+#       item-path: op://ip-automation/ip-automerge/private_key
+#
+# On the public path the token is the SCOPED service account (read-only on the
+# single ip-automerge PEM, not the whole vault) per ADR-045 / ip-bots#207.
+#
+# Failure mode: if op read fails (missing/empty token, missing vault item, 1P
+# outage), this action emits ::error:: and exits non-zero. Calling workflows
+# that need a "NEVER blocks" contract set continue-on-error: true on the step
+# that uses this action and check steps.<id>.outcome before gating the
+# token-mint step.
+
+name: Read App PEM from 1Password
+description: Reads a managed-identity App PEM from 1Password (selected by item-path) and exposes it as the `private-key` output.
+
+inputs:
+  # NOTE for editors: do NOT put GitHub Actions template syntax (double
+  # curly braces around an expression) in the description strings below.
+  # GitHub Actions evaluates templates inside input descriptions, and
+  # composite actions cannot reference secrets directly — so any such
+  # expression in this description errors at action-load time.
+  op-service-account-token:
+    description: '1Password service account token with read access to the scoped item. On the public auto-merge path this is OP_AUTOMERGE_PUBLIC_TOKEN, scoped read-only to the ip-automerge PEM only (ADR-045).'
+    required: true
+  item-path:
+    description: '1Password item reference for the App PEM, e.g. op://ip-automation/ip-automerge/private_key. Required and explicit — every caller names the per-capability identity it mints from.'
+    required: true
+
+outputs:
+  private-key:
+    description: 'The App PEM read from 1Password. Multi-line, masked. Suitable as `private-key:` input to actions/create-github-app-token.'
+    value: ${{ steps.op.outputs.pem }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install 1Password CLI
+      uses: 1password/install-cli-action@8d006a0d0a4fd505af7f7ce589e7f768385ff5e4 # v3.0.0
+
+    - name: Read PEM from 1P
+      id: op
+      shell: bash
+      env:
+        OP_SERVICE_ACCOUNT_TOKEN: ${{ inputs.op-service-account-token }}
+        ITEM_PATH: ${{ inputs.item-path }}
+      run: |
+        set +e
+        PEM=$(op read "$ITEM_PATH" 2>/dev/null)
+        if [ -z "$PEM" ]; then
+          echo "::error::Failed to read PEM from 1P (missing/empty token, missing vault item ${ITEM_PATH}, expired OP_AUTOMERGE_PUBLIC_TOKEN, or 1P outage). See devops-excellence ADR-045 and ip-bots#207 for the scoped-token provisioning."
+          exit 1
+        fi
+        # GitHub's `::add-mask::` directive is line-oriented — a single
+        # `::add-mask::$PEM` on a multi-line value only registers the
+        # first line as masked. Subsequent PEM body lines hit the log
+        # unmasked, both from this step and from the downstream
+        # `actions/create-github-app-token` step (which logs the `with:`
+        # block, expanding the multi-line `private-key:` input into one log
+        # line per PEM line — only the first is masked). Mask each non-empty
+        # line individually so every line of the PEM matches a registered
+        # mask substring in subsequent output.
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          echo "::add-mask::$line"
+        done <<< "$PEM"
+        {
+          echo "pem<<EOF_PEM"
+          echo "$PEM"
+          echo "EOF_PEM"
+        } >> "$GITHUB_OUTPUT"
