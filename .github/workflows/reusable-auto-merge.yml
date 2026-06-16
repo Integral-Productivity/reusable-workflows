@@ -24,9 +24,11 @@
 # org-admin `ip-org-writer`). Per ADR-045 this public copy forwards a SCOPED
 # token instead:
 #
-#   secrets.OP_AUTOMERGE_PUBLIC_TOKEN — a 1Password service-account token whose
-#     vault ACL is read-only on op://ip-automation/ip-automerge/private_key
-#     ALONE. A leak mints only ip-automerge (contents/pull_requests:write).
+#   secrets.OP_AUTOMERGE_PUBLIC_TOKEN — a 1Password service-account token
+#     scoped read-only to the `ip-automation-public` vault, which holds ONLY a
+#     copy of the ip-automerge PEM. (1P service accounts are vault-scoped, not
+#     item-scoped, so the scoped PEM lives in its own vault — ip-bots ADR-003.)
+#     A leak mints only ip-automerge (contents/pull_requests:write).
 #     Provisioned by ip-bots#207 (the precondition for this path going live).
 #
 # The token is declared `required: false` on purpose: GitHub's workflow_call
@@ -57,7 +59,7 @@ on:
   workflow_call:
     secrets:
       OP_AUTOMERGE_PUBLIC_TOKEN:
-        description: 'Scoped 1Password service-account token, read-only on op://ip-automation/ip-automerge/private_key ALONE (ADR-045, ip-bots#207). Declared required:false so a missing token degrades gracefully instead of a 0-second startup_failure; the PEM read fails closed.'
+        description: 'Scoped 1Password service-account token, read-only on the ip-automation-public vault (which holds ONLY the ip-automerge PEM) per ADR-045 / ip-bots#207. Declared required:false so a missing token degrades gracefully instead of a 0-second startup_failure; the PEM read fails closed.'
         required: false
 
 permissions:
@@ -104,7 +106,7 @@ jobs:
         uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
         with:
           op-service-account-token: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
-          item-path: op://ip-automation/ip-automerge/private_key
+          item-path: op://ip-automation-public/ip-automerge/private_key
 
       - name: Fetch Dependabot metadata
         id: meta
@@ -183,7 +185,7 @@ jobs:
         uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
         with:
           op-service-account-token: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
-          item-path: op://ip-automation/ip-automerge/private_key
+          item-path: op://ip-automation-public/ip-automerge/private_key
 
       - name: Generate App token
         id: app-token

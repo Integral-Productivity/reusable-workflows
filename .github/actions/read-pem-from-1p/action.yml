@@ -24,10 +24,12 @@
 #     uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
 #     with:
 #       op-service-account-token: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
-#       item-path: op://ip-automation/ip-automerge/private_key
+#       item-path: op://ip-automation-public/ip-automerge/private_key
 #
-# On the public path the token is the SCOPED service account (read-only on the
-# single ip-automerge PEM, not the whole vault) per ADR-045 / ip-bots#207.
+# On the public path the token is the SCOPED service account, read-only on the
+# ip-automation-public vault (which holds ONLY the ip-automerge PEM) per
+# ADR-045 / ip-bots#207. 1P service accounts are vault-scoped, so the scoped
+# PEM lives in its own vault rather than alongside the others in ip-automation.
 #
 # Failure mode: if op read fails (missing/empty token, missing vault item, 1P
 # outage), this action emits ::error:: and exits non-zero. Calling workflows
