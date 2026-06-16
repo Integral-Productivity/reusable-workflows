@@ -23,6 +23,7 @@ See devops-excellence **ADR-038** for the decision and context.
 | [`validate-plugin-manifest.yml`](.github/workflows/validate-plugin-manifest.yml) | Run `claude plugin validate <manifest>` as a PR gate (auth-free, no secrets). |
 | [`reusable-dependency-review.yml`](.github/workflows/reusable-dependency-review.yml) | Fail a PR if a dependency change adds a `moderate`+ vulnerability (auth-free, no secrets). |
 | [`reusable-claude.yml`](.github/workflows/reusable-claude.yml) | The `@claude` on-demand bot. Needs the org secret `CLAUDE_CODE_OAUTH_TOKEN` (visibility:all). |
+| [`reusable-auto-merge.yml`](.github/workflows/reusable-auto-merge.yml) | Queue `claude/*` + Dependabot (patch/minor) PRs for auto-merge. Needs the **scoped** org secret `OP_AUTOMERGE_PUBLIC_TOKEN` (read-only on the `ip-automerge` PEM only). |
 
 ### `validate-plugin-manifest.yml`
 
@@ -106,11 +107,46 @@ composite actions. `anthropics/claude-code-action@v1` gates execution on the
 commenter's repo permission, so a `@claude` mention from a non-collaborator on
 a public repo does not trigger a run.
 
-## Auto-merge is intentionally not here yet
+### `reusable-auto-merge.yml`
 
-`reusable-auto-merge.yml` is **not** migrated to this public host. It reads a
-managed-identity App PEM from 1Password via the private `read-pem-from-1p`
-composite action and routes `OP_SERVICE_ACCOUNT_TOKEN` through Actions —
-migrating it to a public host is a security-surface change that needs its own
-decision (host the composite action publicly + an ADR). Tracked separately;
-see devops-excellence #189.
+Queues `claude/*` and Dependabot (patch/minor) PRs for auto-merge, minting a
+GitHub App token (not `GITHUB_TOKEN`) so the merge re-triggers downstream CI.
+The PEM read uses the public [`read-pem-from-1p`](.github/actions/read-pem-from-1p/action.yml)
+composite action in this repo (referenced by full public path).
+
+```yaml
+name: Auto-Merge
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  auto-merge:
+    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-auto-merge.yml@main
+    secrets:
+      OP_AUTOMERGE_PUBLIC_TOKEN: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
+```
+
+**Security surface (read [devops-excellence ADR-045](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-045-route-1p-token-through-public-actions-for-auto-merge.md)).**
+Unlike the auth-free reusables above, this one forwards a 1Password token to a
+public runner. To keep the blast radius minimal, it forwards a **scoped**
+service-account token — `OP_AUTOMERGE_PUBLIC_TOKEN`, read-only on
+`op://ip-automation/ip-automerge/private_key` **alone**, not the whole vault.
+A leak mints only `ip-automerge` (contents/pull_requests:write). The broad
+`OP_SERVICE_ACCOUNT_TOKEN` is **never** forwarded here.
+
+The scoped token is provisioned by
+[ip-bots#207](https://github.com/Integral-Productivity/ip-bots/issues/207) (the
+**precondition**). Until it lands, the secret resolves empty and the workflow
+fails closed (the PEM read errors and the merge is skipped) — it never blocks a
+PR. The caller also needs the `ip-automerge` App installed on its repo and the
+`vars.IP_AUTOMERGE_APP_{ID,CLIENT_ID}` org variables (visibility:all). Fork PRs
+receive no secrets and fall through to manual review.
+
+Why a public copy at all: GitHub blocks a public repo from calling a private
+reusable **or** a private composite action, so both the workflow and its
+`read-pem-from-1p` dependency live here. Tracked in
+[devops-excellence#192](https://github.com/Integral-Productivity/devops-excellence/issues/192)
+(umbrella #189).

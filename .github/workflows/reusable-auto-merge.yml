@@ -1,0 +1,228 @@
+# Reusable auto-merge workflow — PUBLIC HOST copy.
+#
+# This is the public-repo-consumable copy of the reusable that also lives in the
+# private `devops-excellence` repo. GitHub does not allow a PUBLIC repo to call
+# a reusable workflow — or a composite action — in a PRIVATE repo (the call
+# fails at startup with 0 jobs), so public `*-claude-plugin` repos must
+# reference THIS host. See devops-excellence ADR-045 (the decision to route a
+# 1Password token + App PEM through public Actions) and ADR-038 (the public-host
+# pattern), plus devops-excellence#192 / #189.
+#
+# Two paths fire from a single workflow:
+#   1. Dependabot PRs: patch and minor bumps are queued for auto-merge; major
+#      bumps always require human review.
+#   2. `claude/*` branches: Claude Code-authored PRs are queued for auto-merge.
+#
+# Both mint a GitHub App token (not GITHUB_TOKEN) so the auto-merge re-triggers
+# downstream workflows that assert on a real actor identity.
+#
+# Credential surface (differs from the private copy — read carefully)
+# -------------------------------------------------------------------
+# The private copy forwards `OP_SERVICE_ACCOUNT_TOKEN`, which is read-only on
+# the WHOLE `ip-automation` vault. Forwarding that to a PUBLIC runner is an
+# unacceptable blast radius (a leak reads every App PEM, including the
+# org-admin `ip-org-writer`). Per ADR-045 this public copy forwards a SCOPED
+# token instead:
+#
+#   secrets.OP_AUTOMERGE_PUBLIC_TOKEN — a 1Password service-account token
+#     scoped read-only to the `ip-automation-public` vault, which holds ONLY a
+#     copy of the ip-automerge PEM. (1P service accounts are vault-scoped, not
+#     item-scoped, so the scoped PEM lives in its own vault — ip-bots ADR-003.)
+#     A leak mints only ip-automerge (contents/pull_requests:write).
+#     Provisioned by ip-bots#207 (the precondition for this path going live).
+#
+# The token is declared `required: false` on purpose: GitHub's workflow_call
+# validator rejects an empty `required: true` secret at startup, producing the
+# opaque 0-second startup_failure (the failure mode reusable-claude.yml hit when
+# its caller landed before the secret existed). With `required: false`, a
+# missing/empty token degrades gracefully — the PEM read fails closed
+# (continue-on-error), emits ::error::, and the merge is skipped. This preserves
+# the "NEVER blocks a PR" contract even before ip-bots#207 provisions the token.
+#
+# Caller secrets block:
+#   secrets:
+#     OP_AUTOMERGE_PUBLIC_TOKEN: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
+#
+# The PEM read is centralized in the PUBLIC `read-pem-from-1p` composite action
+# in this repo, referenced by full public path (public->public, which the
+# devops-excellence public-private-reusable fitness check permits). The
+# token-minting actions are SHA-pinned per ADR-045.
+#
+# This workflow NEVER blocks a PR. If credentials are absent or invalid, or if
+# `gh pr merge --auto` fails, an annotation is emitted and the job exits 0.
+# Token-generation failures emit `::error::`; soft remediation paths emit
+# `::warning::`. The real quality gates are the CI checks.
+
+name: Reusable Auto-Merge
+
+on:
+  workflow_call:
+    secrets:
+      OP_AUTOMERGE_PUBLIC_TOKEN:
+        description: 'Scoped 1Password service-account token, read-only on the ip-automation-public vault (which holds ONLY the ip-automerge PEM) per ADR-045 / ip-bots#207. Declared required:false so a missing token degrades gracefully instead of a 0-second startup_failure; the PEM read fails closed.'
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dependabot:
+    name: Auto-merge Dependabot (patch/minor)
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+      - name: Verify org variable identifiers are configured
+        id: app_id_check
+        # APP_ID + CLIENT_ID are org variables (ADR-005), accessible in any
+        # scope. See orgops#131 (origin of the precheck pattern) and issue #37.
+        env:
+          APP_ID: ${{ vars.IP_AUTOMERGE_APP_ID }}
+          CLIENT_ID: ${{ vars.IP_AUTOMERGE_APP_CLIENT_ID }}
+        run: |
+          missing=0
+          if [ -z "${APP_ID:-}" ]; then
+            echo "::warning::vars.IP_AUTOMERGE_APP_ID is not set on this repo or the org. Fix: gh variable set IP_AUTOMERGE_APP_ID --org Integral-Productivity --visibility all --body '<numeric-app-id>'"
+            missing=1
+          fi
+          if [ -z "${CLIENT_ID:-}" ]; then
+            echo "::warning::vars.IP_AUTOMERGE_APP_CLIENT_ID is not set on this repo or the org. Fix: gh variable set IP_AUTOMERGE_APP_CLIENT_ID --org Integral-Productivity --visibility all --body '<Iv23li...>'"
+            missing=1
+          fi
+          if [ "$missing" = "1" ]; then
+            echo "::warning::Skipping auto-merge — required org variable identifiers are missing. See warnings above."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read auto-merge App PEM from 1Password
+        id: pem
+        if: steps.app_id_check.outputs.ready == 'true'
+        continue-on-error: true
+        # `continue-on-error: true` preserves the "NEVER blocks a PR" contract;
+        # downstream token-mint is gated on success. A missing/empty scoped
+        # token (pre-ip-bots#207) fails here and cleanly skips the merge.
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        with:
+          op-service-account-token: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
+          item-path: op://ip-automation-public/ip-automerge/private_key
+
+      - name: Fetch Dependabot metadata
+        id: meta
+        # `dependabot/fetch-metadata` refuses to proceed when a PR's commits
+        # aren't cryptographically verified as Dependabot-signed (see #16/#18).
+        # `continue-on-error: true` keeps the "NEVER blocks" contract; the
+        # downstream mint gates on steps.meta.outcome == 'success', so
+        # unverified PRs cleanly fall through to manual review.
+        if: steps.app_id_check.outputs.ready == 'true' && steps.pem.outcome == 'success'
+        continue-on-error: true
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate App token
+        id: app-token
+        if: |
+          steps.app_id_check.outputs.ready == 'true'
+          && steps.pem.outcome == 'success'
+          && steps.meta.outcome == 'success'
+          && (steps.meta.outputs.update-type == 'version-update:semver-patch' || steps.meta.outputs.update-type == 'version-update:semver-minor')
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_AUTOMERGE_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+
+      - name: Error if token generation failed
+        if: steps.app-token.outcome == 'failure'
+        # Literal block scalar (`|`) so the `#14` reference isn't truncated by
+        # YAML's comment parser (see devops-excellence #109 fix).
+        run: |
+          echo "::error::App token generation failed — PEM was read from 1P at op://ip-automation/ip-automerge/private_key, but actions/create-github-app-token still failed. Check that vars.IP_AUTOMERGE_APP_CLIENT_ID is set at the org level and that the ip-automerge App is installed on this repo. See devops-excellence issue #14 for the silent-failure history."
+
+      - name: Enable auto-merge (squash)
+        if: steps.app-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr merge --auto --squash "$PR_URL" || \
+            echo "::warning::gh pr merge --auto failed — merge manually if needed"
+
+  claude-branches:
+    name: Auto-merge claude/* branches
+    runs-on: ubuntu-latest
+    if: startsWith(github.head_ref, 'claude/')
+    steps:
+      - name: Verify org variable identifiers are configured
+        id: app_id_check
+        # Mirrors the Dependabot job's precheck — see that job for context.
+        env:
+          APP_ID: ${{ vars.IP_AUTOMERGE_APP_ID }}
+          CLIENT_ID: ${{ vars.IP_AUTOMERGE_APP_CLIENT_ID }}
+        run: |
+          missing=0
+          if [ -z "${APP_ID:-}" ]; then
+            echo "::warning::vars.IP_AUTOMERGE_APP_ID is not set on this repo or the org. Fix: gh variable set IP_AUTOMERGE_APP_ID --org Integral-Productivity --visibility all --body '<numeric-app-id>'"
+            missing=1
+          fi
+          if [ -z "${CLIENT_ID:-}" ]; then
+            echo "::warning::vars.IP_AUTOMERGE_APP_CLIENT_ID is not set on this repo or the org. Fix: gh variable set IP_AUTOMERGE_APP_CLIENT_ID --org Integral-Productivity --visibility all --body '<Iv23li...>'"
+            missing=1
+          fi
+          if [ "$missing" = "1" ]; then
+            echo "::warning::Skipping auto-merge — required org variable identifiers are missing. See warnings above."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read auto-merge App PEM from 1Password
+        id: pem
+        if: steps.app_id_check.outputs.ready == 'true'
+        continue-on-error: true
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        with:
+          op-service-account-token: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
+          item-path: op://ip-automation-public/ip-automerge/private_key
+
+      - name: Generate App token
+        id: app-token
+        if: |
+          steps.app_id_check.outputs.ready == 'true'
+          && steps.pem.outcome == 'success'
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_AUTOMERGE_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+
+      - name: Error if token generation failed
+        if: steps.app-token.outcome == 'failure'
+        # Literal block scalar — see Dependabot job's identical step.
+        run: |
+          echo "::error::App token generation failed — PEM was read from 1P at op://ip-automation/ip-automerge/private_key, but actions/create-github-app-token still failed. Check that vars.IP_AUTOMERGE_APP_CLIENT_ID is set at the org level and that the ip-automerge App is installed on this repo. See devops-excellence issue #14 for the silent-failure history."
+
+      - name: Enable auto-merge (squash)
+        if: steps.app-token.outcome == 'success'
+        # Pass --subject and --body so the PR body — including any "Closes #N"
+        # keywords — lands on `main` as the squash commit body (GitHub's default
+        # squash format drops the PR body, breaking auto-close of linked issues
+        # when an App performs the merge; see devops-excellence ADR-020 / #32).
+        #
+        # PR_TITLE / PR_BODY are attacker-influenceable strings routed through
+        # `env:` and referenced as "$PR_TITLE"/"$PR_BODY" — the env-var-mediated
+        # form that avoids the ${{ }}->run: script-injection class (ADR-045
+        # threat model). Do NOT inline-expand title/body in a run: step.
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          gh pr merge --auto --squash "$PR_URL" \
+            --subject "${PR_TITLE} (#${PR_NUMBER})" \
+            --body "${PR_BODY}" || \
+            echo "::warning::gh pr merge --auto failed — merge manually if needed"
