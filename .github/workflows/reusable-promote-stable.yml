@@ -1,0 +1,161 @@
+# Reusable Promote-to-Stable workflow — PUBLIC HOST copy.
+#
+# Advances a plugin repo's `stable` branch to a tagged release commit by a
+# fast-forward push. The Integral-Productivity internal marketplace
+# (https://github.com/Integral-Productivity/marketplace-internal) tracks the
+# `stable` ref, so tagging vX.Y.Z is what publishes a release to users.
+#
+# A thin caller in each plugin repo triggers this on a semver tag push:
+#
+#   name: Promote to stable
+#   on:
+#     push:
+#       tags: ['v[0-9]+.[0-9]+.[0-9]+']   # pre-release suffixes are excluded
+#   jobs:
+#     promote:
+#       uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-promote-stable.yml@v1
+#       secrets:
+#         OP_RELEASER_PUBLIC_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+#
+# Why the ip-releaser App token (not GITHUB_TOKEN)
+# ------------------------------------------------
+# `stable` is protected by an org ruleset (require-PR + non_fast_forward) that
+# lists the ip-releaser App as a bypass actor at bypass_mode `always`, so this
+# job must push AS that App. The default GITHUB_TOKEN is not a bypass actor and
+# its push is declined (`GH006: protected branch ...`). See devops-excellence
+# ADR-064 (the protected-but-App-bypassable stable standard). The private-repo
+# reference this generalizes: product-architecture-claude-plugin#27.
+#
+# Public host + why this file lives here
+# --------------------------------------
+# Five of six keeper plugin repos are PUBLIC, and GitHub does not allow a public
+# repo to call a reusable workflow — or a composite action — in a private repo
+# (the call fails at startup with 0 jobs). So this reusable, and the
+# `read-pem-from-1p` composite action it uses, must live in this public host.
+# See ADR-038 (public-host pattern) and ADR-045 (routing a 1P token through
+# public Actions).
+#
+# Credential surface (scoped token — read carefully)
+# --------------------------------------------------
+# This forwards a SCOPED 1Password token, NOT the whole-vault
+# `OP_SERVICE_ACCOUNT_TOKEN`. Per ADR-064 (mirroring ADR-045):
+#
+#   secrets.OP_RELEASER_PUBLIC_TOKEN — a 1Password service-account token scoped
+#     read-only to the `ip-automation-public` vault, which holds ONLY a copy of
+#     the ip-releaser PEM (1P service accounts are vault-scoped, not
+#     item-scoped — ip-bots ADR-003). A leak mints only ip-releaser
+#     (contents:write). Provisioned by ip-bots (the precondition for this path
+#     going live).
+#
+# Declared `required: false` so a missing/empty secret does NOT produce the
+# opaque 0-second startup_failure that GitHub's workflow_call validator raises
+# for an empty `required: true` secret. But UNLIKE auto-merge (which soft-fails
+# so it never blocks a PR), promote-stable HARD-FAILS at runtime if it cannot
+# mint the token: a release tag whose `stable` promotion silently no-ops would
+# ship a stale version to marketplace users. So the steps below carry no
+# `continue-on-error` — a missing token, unreadable PEM, or version mismatch
+# fails the job loudly and leaves `stable` untouched.
+#
+# The token-minting action is SHA-pinned per ADR-045. This workflow uses no
+# `actions/cache` or `upload-artifact`. The tag push only fires in-repo (no
+# fork-PR secret exposure).
+
+name: Reusable Promote to Stable
+
+on:
+  workflow_call:
+    inputs:
+      plugin-manifest-path:
+        description: 'Path to the plugin manifest whose `version` must match the tag before stable advances.'
+        type: string
+        required: false
+        default: '.claude-plugin/plugin.json'
+    secrets:
+      OP_RELEASER_PUBLIC_TOKEN:
+        description: 'Scoped 1Password service-account token, read-only on the ip-automation-public vault (which holds ONLY the ip-releaser PEM) per ADR-064 / ADR-045. Declared required:false so a missing token degrades to a loud runtime failure instead of a 0-second startup_failure.'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Promote to stable
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify org variable identifiers are configured
+        env:
+          APP_ID: ${{ vars.IP_RELEASER_APP_ID }}
+          CLIENT_ID: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_ID:-}" ] || [ -z "${CLIENT_ID:-}" ]; then
+            echo "::error::vars.IP_RELEASER_APP_ID / IP_RELEASER_APP_CLIENT_ID are not set. promote-stable pushes as the ip-releaser App (the stable ruleset bypass actor); without them it cannot advance stable. Set them at the org level (visibility ALL). See ADR-064." >&2
+            exit 1
+          fi
+
+      - name: Verify scoped 1Password token is present
+        env:
+          OP_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OP_TOKEN:-}" ]; then
+            echo "::error::secrets.OP_RELEASER_PUBLIC_TOKEN is empty. The caller must forward it (secrets: OP_RELEASER_PUBLIC_TOKEN: \${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}), and ip-bots must have provisioned the scoped ip-automation-public vault token. Refusing to promote — a silent no-op would ship a stale release. See ADR-064." >&2
+            exit 1
+          fi
+
+      - name: Read ip-releaser App PEM from 1Password (public host copy)
+        id: pem
+        # Public->public composite-action reference (the private original lives
+        # in devops-excellence; this is its public counterpart). No
+        # continue-on-error: promote-stable hard-fails if the PEM can't be read.
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        with:
+          op-service-account-token: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+          item-path: op://ip-automation-public/ip-releaser/private_key
+
+      - name: Generate ip-releaser App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+
+      - name: Checkout tagged commit as the App
+        uses: actions/checkout@v4
+        with:
+          # Persist the App token so the fast-forward push below authenticates
+          # as ip-releaser (the stable ruleset's bypass actor).
+          token: ${{ steps.app-token.outputs.token }}
+          # Full history so the push can resolve the tagged commit ↔ stable
+          # relationship for a fast-forward.
+          fetch-depth: 0
+
+      - name: Verify manifest version matches tag
+        env:
+          MANIFEST_PATH: ${{ inputs.plugin-manifest-path }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+          if [ ! -f "${MANIFEST_PATH}" ]; then
+            echo "::error::Plugin manifest not found at ${MANIFEST_PATH}. Set inputs.plugin-manifest-path if it lives elsewhere." >&2
+            exit 1
+          fi
+          manifest_version="$(jq -r '.version' "${MANIFEST_PATH}")"
+          echo "Tag:            ${tag}"
+          echo "Tag version:    ${tag_version}"
+          echo "Manifest ver.:  ${manifest_version}"
+          if [ "${tag_version}" != "${manifest_version}" ]; then
+            echo "::error::Tag ${tag} does not match ${MANIFEST_PATH} version ${manifest_version}. Refusing to advance stable." >&2
+            exit 1
+          fi
+
+      - name: Fast-forward stable to tagged commit
+        run: |
+          set -euo pipefail
+          tag_sha="$(git rev-parse HEAD)"
+          echo "Advancing refs/heads/stable to ${tag_sha} (${GITHUB_REF_NAME})"
+          # No --force. If stable exists and the tagged commit is not a
+          # fast-forward descendant, this push fails and stable is left alone.
+          git push origin "${tag_sha}:refs/heads/stable"
