@@ -16,6 +16,65 @@ home for reusable workflows that public repos need.
 
 See devops-excellence **ADR-038** for the decision and context.
 
+## Versioning
+
+**Pin the moving major tag: `@v1`.** Consumers reference these reusables at a
+semver major alias, not at `@main`:
+
+```yaml
+uses: Integral-Productivity/reusable-workflows/.github/workflows/<name>.yml@v1
+```
+
+### Why not `@main`
+
+`@main` is a moving cross-repo ref: a rename, removal, or incompatible input
+change to any reusable here would break **every** caller instantly — no PR, no
+review, and for scheduled or post-merge jobs, no human watching. `@v1` keeps the
+one good property of `@main` (non-breaking fixes flow automatically) without the
+fragility (a breaking change ships as `v2`, leaving `@v1` callers untouched until
+they adopt it deliberately).
+
+This repo adopts the org-wide convention decided in devops-excellence
+[**ADR-046**](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-046-semver-tags-for-reusables.md)
+— which explicitly defers the public `reusable-workflows` sibling to "a separate
+record for that repo." This section is that record. (Tracked in
+[#9](https://github.com/Integral-Productivity/reusable-workflows/issues/9).)
+
+### Which ref to pin
+
+| Pin | Behaviour | Use when |
+|---|---|---|
+| `@v1` | Moving major — always the latest `v1.x.y`; auto-inherits non-breaking fixes. **Default.** | Almost always. |
+| `@v1.2.3` | Immutable exact release. | Reproducibility-critical callers that want to bump deliberately. |
+| `@<full-sha>` | Immutable commit; ignores all tag movement. | Supply-chain-hardened callers. |
+
+Avoid `@main` in new callers — it is the fragility this section exists to retire.
+
+### Semver policy (repo-wide major)
+
+One repo-wide major tag covers **all** reusable workflows and the
+`read-pem-from-1p` composite action (the `actions/checkout@v4` mental model —
+one tag to keep moving, not one per unit).
+
+- A **breaking change to any unit** — rename, removal, or incompatible
+  input/secret change — is a **major bump** (`v2`). `@v1` callers keep the last
+  `v1.x` behaviour untouched.
+- A **backward-compatible** fix or addition is a **minor/patch** bump,
+  auto-inherited by `@v1` callers.
+
+### Release process
+
+1. Publish a **GitHub Release** tagged `vX.Y.Z` (immutable) from `main`.
+2. [`major-tag-mover.yml`](.github/workflows/major-tag-mover.yml) fires on
+   `release: published` and fast-forwards the moving major (`vX`) to that commit
+   — using `git` + `GITHUB_TOKEN` only, no marketplace action
+   ([ADR-012](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-012-actions-allow-list-policy.md)).
+
+The human chooses **when** to cut a release; moving the major alias (the
+drift-prone step) is automated. Moving major tags are mutable refs — an inherent
+`@vN` supply-chain consideration; callers needing immutability pin `@v1.2.3` or a
+SHA per the table above.
+
 ## Available workflows
 
 | Workflow | Purpose |
@@ -38,7 +97,7 @@ permissions:
   contents: read
 jobs:
   validate:
-    uses: Integral-Productivity/reusable-workflows/.github/workflows/validate-plugin-manifest.yml@main
+    uses: Integral-Productivity/reusable-workflows/.github/workflows/validate-plugin-manifest.yml@v1
     # with:
     #   manifest-path: .claude-plugin/marketplace.json   # default: .claude-plugin/plugin.json
 ```
@@ -64,7 +123,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-dependency-review.yml@main
+    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-dependency-review.yml@v1
 ```
 
 Takes no secrets and references no private-repo actions, so it is fully
@@ -96,7 +155,7 @@ jobs:
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
-    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-claude.yml@main
+    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-claude.yml@v1
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
@@ -124,7 +183,7 @@ permissions:
   pull-requests: write
 jobs:
   auto-merge:
-    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-auto-merge.yml@main
+    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-auto-merge.yml@v1
     secrets:
       OP_AUTOMERGE_PUBLIC_TOKEN: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
 ```
@@ -167,7 +226,7 @@ on:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']   # pre-release suffixes excluded
 jobs:
   promote:
-    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-promote-stable.yml@main
+    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-promote-stable.yml@v1
     secrets:
       OP_RELEASER_PUBLIC_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
 ```
