@@ -150,3 +150,45 @@ reusable **or** a private composite action, so both the workflow and its
 `read-pem-from-1p` dependency live here. Tracked in
 [devops-excellence#192](https://github.com/Integral-Productivity/devops-excellence/issues/192)
 (umbrella #189).
+
+### `reusable-promote-stable.yml`
+
+Advances a plugin repo's `stable` branch to a tagged release commit by a
+**fast-forward push authenticating as the `ip-releaser` App**. The internal
+marketplace tracks `stable`, so pushing a `vX.Y.Z` tag is what publishes a
+release to users. The PEM read uses the same public
+[`read-pem-from-1p`](.github/actions/read-pem-from-1p/action.yml) composite
+action as auto-merge.
+
+```yaml
+name: Promote to stable
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']   # pre-release suffixes excluded
+jobs:
+  promote:
+    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-promote-stable.yml@main
+    secrets:
+      OP_RELEASER_PUBLIC_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+```
+
+**Security surface (read [devops-excellence ADR-064](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-064-protected-but-app-bypassable-stable-for-plugin-repos.md)).**
+`stable` is protected by an org ruleset (require-PR + non-fast-forward) that
+lists `ip-releaser` as a bypass actor, so the push must be made **as that App** —
+the default `GITHUB_TOKEN` is declined (`GH006`). Like auto-merge, this forwards
+a **scoped** service-account token — `OP_RELEASER_PUBLIC_TOKEN`, read-only on
+`op://ip-automation-public/ip-releaser/private_key` **alone**, not the whole
+vault. A leak mints only `ip-releaser` (contents:write); `OP_SERVICE_ACCOUNT_TOKEN`
+is **never** forwarded here (the scoping rationale mirrors
+[ADR-045](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-045-route-1p-token-through-public-actions-for-auto-merge.md)).
+
+**Unlike auto-merge, promote-stable hard-fails.** A missing token, unreadable
+PEM, or tag-↔-manifest version mismatch fails the job loudly and leaves `stable`
+untouched — a silent no-op would ship a stale release to marketplace users. The
+push is fast-forward only (no `--force`); `stable` is never rewound.
+
+Preconditions: the `OP_RELEASER_PUBLIC_TOKEN` scoped token (provisioned), the
+`vars.IP_RELEASER_APP_{ID,CLIENT_ID}` org variables (visibility:all), and
+`ip-releaser` installed on the target repo with `contents:write`. Standardization
+tracked in
+[devops-excellence#415](https://github.com/Integral-Productivity/devops-excellence/issues/415).
