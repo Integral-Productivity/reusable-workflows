@@ -1,0 +1,57 @@
+# Major-tag mover: fast-forwards the moving major tag (e.g. v1) to the commit
+# that a new semver release (e.g. v1.2.3) was published on.
+#
+# Fires on `release: published`. Non-semver tags are ignored (no-op).
+# Uses only `git` + `GITHUB_TOKEN` git push; no marketplace action (ADR-012).
+#
+# Consumers of this repo's reusable workflows pin a moving major tag (e.g. @v1)
+# that always points at the latest v1.x.y release — the convention this repo
+# adopts from devops-excellence ADR-046 (decision 3). See README "Versioning".
+#
+# Usage (on each semver release): publish a GitHub Release tagged vX.Y.Z;
+# this workflow creates/moves vX to that commit. No operator action needed.
+
+name: Major tag mover
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  move-tag:
+    name: Fast-forward major tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repo (full history for tag push)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute major tag and fast-forward
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Validate semver: must be vX.Y.Z (with optional pre-release/build suffix).
+          # Non-semver tags produce no-op output and exit 0.
+          if ! [[ "$TAG" =~ ^v([0-9]+)\. ]]; then
+            echo "Tag '$TAG' is not a semver vX.Y.Z tag — skipping."
+            exit 0
+          fi
+
+          MAJOR_TAG="v${BASH_REMATCH[1]}"
+          echo "Release tag : $TAG"
+          echo "Moving major: $MAJOR_TAG → $(git rev-parse HEAD)"
+
+          # Delete the remote tag if it already exists (force-move).
+          git tag --delete "$MAJOR_TAG" 2>/dev/null || true
+          git push origin ":refs/tags/$MAJOR_TAG" 2>/dev/null || true
+
+          # Create and push the moving major tag at the release commit.
+          git tag "$MAJOR_TAG"
+          git push origin "refs/tags/$MAJOR_TAG"
+
+          echo "Done: $MAJOR_TAG now points to $(git rev-parse HEAD)"

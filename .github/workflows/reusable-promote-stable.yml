@@ -13,7 +13,7 @@
 #       tags: ['v[0-9]+.[0-9]+.[0-9]+']   # pre-release suffixes are excluded
 #   jobs:
 #     promote:
-#       uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-promote-stable.yml@main
+#       uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-promote-stable.yml@v1
 #       secrets:
 #         OP_RELEASER_PUBLIC_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
 #
