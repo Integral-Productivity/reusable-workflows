@@ -17,6 +17,12 @@
 #       secrets:
 #         OP_RELEASER_PUBLIC_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
 #
+# The caller needs NO `permissions:` block — this workflow requests only
+# `contents: read`, which the org default already grants. (If you are pinned to
+# a `@v1` release from before this change, it requested `contents: write` and
+# the caller DID need `permissions: contents: write`; without it the run ends in
+# an opaque `startup_failure`.)
+#
 # Why the ip-releaser App token (not GITHUB_TOKEN)
 # ------------------------------------------------
 # `stable` is protected by an org ruleset (require-PR + non_fast_forward) that
@@ -75,8 +81,19 @@ on:
         description: 'Scoped 1Password service-account token, read-only on the ip-automation-public vault (which holds ONLY the ip-releaser PEM) per ADR-064 / ADR-045. Declared required:false so a missing token degrades to a loud runtime failure instead of a 0-second startup_failure.'
         required: false
 
+# Deliberately `read`, not `write`. This workflow never uses GITHUB_TOKEN for a
+# write: `actions/checkout` is handed the ip-releaser App token explicitly, and
+# the fast-forward push authenticates with those persisted App credentials (see
+# "Why the ip-releaser App token" above). Requesting only `read` matters because
+# a called reusable cannot request greater permissions than its caller grants,
+# and both this org and its repos default `default_workflow_permissions` to
+# `read` — so while this declared `contents: write`, every caller was forced to
+# declare a matching `permissions:` block or the run died in `startup_failure`
+# with 0 jobs and no logs. Four plugin repos hit exactly that. At `read`, a thin
+# caller needs no `permissions:` block at all, and callers that already declare
+# `contents: write` keep working (a caller may grant more than the reusable asks).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   promote:
