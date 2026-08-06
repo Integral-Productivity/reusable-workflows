@@ -1,0 +1,80 @@
+# Self-CI for this repository's own GitHub Actions definitions.
+#
+# Why this file exists: every other workflow here is `on: workflow_call` (a
+# reusable, executed only from a *consumer* repo) or `on: release: published`.
+# None of them run on a PR to this repo, so without this job a change to a
+# workflow that all 51 consumers pin at `@v1` would merge having passed through
+# nothing that understands GitHub Actions. See issue #19.
+#
+# The job name `actionlint` is the status-check context that branch protection
+# names as a required check (issue #20). Renaming the job renames the context
+# and silently drops the requirement — update the ruleset in the same change.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# This job reads the repo and reports findings in its own log. Nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # actionlint is installed from its upstream release tarball rather than via
+      # a third-party action. This repo's Actions policy is `allowed_actions:
+      # selected`, and its allowlist covers only `actions/*`, `anthropics/*`,
+      # `dependabot/*`, `github/codeql-action/*`, `pnpm/*`, `supabase/*`,
+      # `changesets/*` plus Marketplace-verified owners. `reviewdog/action-actionlint`
+      # — the usual wrapper — is published by an unverified owner, so a run using
+      # it would be rejected outright. Pinning the released binary by version *and*
+      # SHA-256 gives the same supply-chain guarantee as pinning an action by
+      # commit SHA (devops-excellence ADR-045) with one fewer intermediary.
+      #
+      # To bump: change both values together. Checksums are published in the
+      # release as actionlint_<version>_checksums.txt.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum --check --strict -
+          tar -xzf "$tarball" actionlint
+          ./actionlint --version
+
+      # actionlint's shellcheck integration is opt-out: it silently disables the
+      # rule when the shellcheck binary is missing. ubuntu-latest ships it, but a
+      # future image change would otherwise turn off half of what this job is for
+      # without any signal, so assert its presence and fail loudly instead.
+      - name: Verify shellcheck is available to actionlint
+        run: |
+          set -euo pipefail
+          command -v shellcheck
+          shellcheck --version
+
+      # No arguments: actionlint finds `.github/workflows/` itself and lints every
+      # workflow, including this one. Findings exit non-zero and fail the job.
+      #
+      # Coverage note: actionlint is a *workflow* linter with no mode for
+      # standalone composite-action files — passing `.github/actions/**/action.yml`
+      # makes it parse the file as a workflow and emit spurious `syntax-check`
+      # errors. Those files are therefore not covered here; see the follow-up
+      # noted on issue #19.
+      - name: Lint workflow YAML and `run:` shell
+        run: ./actionlint -color -verbose
