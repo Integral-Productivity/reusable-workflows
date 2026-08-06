@@ -59,21 +59,40 @@ shape. A cross-repo reference is therefore always unambiguous: `RWF-002` is this
 repo, `ADR-046` is devops-excellence, `SAE-006` is
 software-architecture-excellence.
 
-Because adr-tools derives the next number from filenames beginning with a digit,
-`adr new` will not see `RWF-`-prefixed files and will restart at `0001`. Author
-new records by hand (copy an existing one) or rename the generated file, as was
-done for this record. This is the same trade the sibling repos already make, and
-it is worth the unambiguous prefix.
+adr-tools derives its next number from filenames beginning with a digit, so
+`adr new` cannot see `RWF-`-prefixed records and restarts at `0001` every time.
+The prefix is deliberate and the auto-numbering is not load-bearing, so the
+tooling is wrapped rather than the convention bent:
+[`scripts/new-adr.sh`](../../scripts/new-adr.sh) is the supported way to create
+a record. It computes the next number by scanning `docs/adr/RWF-*.md`, runs the
+clause 3 reservation checks against that number, then invokes `adr new` for the
+body and rewrites the generated header into this repo's format. Creating a
+record by hand still works; the wrapper is what makes the number trustworthy.
 
 **3. Before claiming a number, check every reservation surface** — not just the
-directory listing. Re-list `docs/adr/` on `main`, grep the project memory
-directory for the number, and run
-`gh search prs --repo Integral-Productivity/reusable-workflows "RWF-NNN"`.
+directory listing:
+
+| Surface | Why it is not redundant |
+|---|---|
+| `docs/adr/` in the working tree | The obvious one. |
+| `docs/adr/` on `origin/main` | A record merged but not yet pulled is invisible to a plain `ls`. |
+| Open PRs (`gh search prs --repo Integral-Productivity/reusable-workflows "RWF-NNN"`) | Work in progress does not appear on GitHub until a PR exists, and two open PRs claiming one number both look mergeable until the first merges. The on-disk surfaces structurally cannot see this. |
+| Project memory | A number can be reserved in a session's notes before any file or PR exists. |
+
+`scripts/new-adr.sh` runs all four and refuses to claim a number that any of
+them reports as taken. When a surface cannot be checked automatically — `gh`
+missing or unauthenticated, no `origin/main` ref — it prints the exact command
+with the number filled in and requires explicit confirmation before proceeding,
+rather than claiming the next on-disk number silently. A wrapper that skipped
+the in-flight-PR surface would reintroduce precisely the collision this protocol
+exists to prevent.
+
 Duplicate-numbered ADRs have happened in this org and required renumber PRs to
 fix; see devops-excellence
 [ADR-070](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-070-adr-number-collision-pr-check.md)
-for the worked failure mode and the automated check that backs the protocol
-there.
+for the worked failure mode and the automated CI checks that back the protocol
+there. This repo has no such CI check yet — the wrapper is a local guard, not an
+enforced gate.
 
 **4. Scope boundary — what belongs here versus in `devops-excellence`.**
 
@@ -111,8 +130,13 @@ operative warning stays inline.
   contract, which clause 4 places squarely in this repo; #18 concerns the
   org-wide triage vocabulary, which — being org-wide — belongs upstream, with at
   most a pointer here.
-- `adr new` is not usable as-is (see clause 2). The cost is one manual copy per
-  record.
+- `adr new` is not usable directly (clause 2), so the repo carries a shell
+  script it would not otherwise need. In exchange, the reservation protocol runs
+  by default instead of depending on whoever creates the record remembering four
+  checks.
+- The wrapper is a *local* guard. It cannot stop a collision created by someone
+  who bypasses it, and there is no CI check here to catch that — unlike
+  devops-excellence, which has both an on-disk and a cross-PR check.
 - A reader who sees a bare number in this repo can tell which repo owns it from
   the prefix alone. The cost is that `RWF-` is a fourth prefix to remember
   alongside `ADR-`, `SAE-`, and the product-repo conventions.

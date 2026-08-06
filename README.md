@@ -76,6 +76,24 @@ and is cited rather than restated.
 | [RWF-001](docs/adr/RWF-001-record-architecture-decisions-with-the-rwf-prefix.md) | Record ADRs here, numbered `RWF-NNN`, scoped to hosting concerns. |
 | [RWF-002](docs/adr/RWF-002-pin-consumers-to-the-moving-v1-major-alias.md) | Pin consumers to the moving `@v1` major alias, not `@main`. |
 
+### Creating a new ADR
+
+```bash
+./scripts/new-adr.sh "Title of the decision"
+```
+
+[`scripts/new-adr.sh`](scripts/new-adr.sh) computes the next `RWF-NNN` by
+scanning `docs/adr/`, runs the four reservation checks from RWF-001 clause 3
+(working tree, `origin/main`, open PRs, project memory), then generates the
+record via [adr-tools](https://github.com/npryce/adr-tools) and rewrites its
+header into the house format. Add `--dry-run` to see the number it would claim
+without creating anything.
+
+Use the wrapper rather than `adr new` directly — adr-tools numbers from
+filenames starting with a digit, so it cannot see the `RWF-` prefix and would
+restart at `0001`. After creating a record, fill in Context / Decision /
+Consequences and add a row to the table above.
+
 ## Available workflows
 
 | Workflow | Purpose |
