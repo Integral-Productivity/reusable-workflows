@@ -25,20 +25,12 @@ semver major alias, not at `@main`:
 uses: Integral-Productivity/reusable-workflows/.github/workflows/<name>.yml@v1
 ```
 
-### Why not `@main`
-
-`@main` is a moving cross-repo ref: a rename, removal, or incompatible input
-change to any reusable here would break **every** caller instantly — no PR, no
-review, and for scheduled or post-merge jobs, no human watching. `@v1` keeps the
-one good property of `@main` (non-breaking fixes flow automatically) without the
-fragility (a breaking change ships as `v2`, leaving `@v1` callers untouched until
-they adopt it deliberately).
-
-This repo adopts the org-wide convention decided in devops-excellence
-[**ADR-046**](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-046-semver-tags-for-reusables.md)
-— which explicitly defers the public `reusable-workflows` sibling to "a separate
-record for that repo." This section is that record. (Tracked in
-[#9](https://github.com/Integral-Productivity/reusable-workflows/issues/9).)
+The decision and its rationale — why not `@main`, why one repo-wide major rather
+than one per unit, and what was rejected — live in
+[**RWF-002**](docs/adr/RWF-002-pin-consumers-to-the-moving-v1-major-alias.md).
+It implements the org-wide convention of devops-excellence
+[ADR-046](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-046-semver-tags-for-reusables.md).
+What follows is the operational summary.
 
 ### Which ref to pin
 
@@ -48,19 +40,14 @@ record for that repo." This section is that record. (Tracked in
 | `@v1.2.3` | Immutable exact release. | Reproducibility-critical callers that want to bump deliberately. |
 | `@<full-sha>` | Immutable commit; ignores all tag movement. | Supply-chain-hardened callers. |
 
-Avoid `@main` in new callers — it is the fragility this section exists to retire.
+Avoid `@main` in new callers. Moving major tags are mutable refs — an inherent
+`@vN` supply-chain consideration; callers needing immutability pin `@v1.2.3` or a
+SHA per the table above.
 
-### Semver policy (repo-wide major)
-
-One repo-wide major tag covers **all** reusable workflows and the
-`read-pem-from-1p` composite action (the `actions/checkout@v4` mental model —
-one tag to keep moving, not one per unit).
-
-- A **breaking change to any unit** — rename, removal, or incompatible
-  input/secret change — is a **major bump** (`v2`). `@v1` callers keep the last
-  `v1.x` behaviour untouched.
-- A **backward-compatible** fix or addition is a **minor/patch** bump,
-  auto-inherited by `@v1` callers.
+One repo-wide major covers **all** reusable workflows and the `read-pem-from-1p`
+composite action. A breaking change to **any** unit is a major bump (`v2`);
+backward-compatible fixes and additions are minor/patch and reach `@v1` callers
+automatically.
 
 ### Release process
 
@@ -71,9 +58,23 @@ one tag to keep moving, not one per unit).
    ([ADR-012](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-012-actions-allow-list-policy.md)).
 
 The human chooses **when** to cut a release; moving the major alias (the
-drift-prone step) is automated. Moving major tags are mutable refs — an inherent
-`@vN` supply-chain consideration; callers needing immutability pin `@v1.2.3` or a
-SHA per the table above.
+drift-prone step) is automated.
+
+## Architecture decisions
+
+This repo's ADRs live in [`docs/adr/`](docs/adr/), numbered `RWF-NNN`.
+[RWF-001](docs/adr/RWF-001-record-architecture-decisions-with-the-rwf-prefix.md)
+states the numbering convention and the scope boundary: decisions **specific to
+hosting these reusables** (caller contracts, versioning, why a unit here diverges
+from its private counterpart) are recorded here; org-wide policy that merely
+happens to be implemented here stays in
+[`devops-excellence`](https://github.com/Integral-Productivity/devops-excellence/tree/main/docs/adr)
+and is cited rather than restated.
+
+| ADR | Decision |
+|---|---|
+| [RWF-001](docs/adr/RWF-001-record-architecture-decisions-with-the-rwf-prefix.md) | Record ADRs here, numbered `RWF-NNN`, scoped to hosting concerns. |
+| [RWF-002](docs/adr/RWF-002-pin-consumers-to-the-moving-v1-major-alias.md) | Pin consumers to the moving `@v1` major alias, not `@main`. |
 
 ## Available workflows
 
