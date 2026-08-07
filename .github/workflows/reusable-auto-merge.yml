@@ -35,9 +35,10 @@
 # validator rejects an empty `required: true` secret at startup, producing the
 # opaque 0-second startup_failure (the failure mode reusable-claude.yml hit when
 # its caller landed before the secret existed). With `required: false`, a
-# missing/empty token degrades gracefully — the PEM read fails closed
-# (continue-on-error), emits ::error::, and the merge is skipped. This preserves
-# the "NEVER blocks a PR" contract even before ip-bots#207 provisions the token.
+# missing/empty token reaches the PEM step instead of killing the run at
+# startup, so the failure is reported as a legible `::error::` with remediation
+# rather than an unexplained 0-second abort. It is still a failure — see the
+# failure contract below.
 #
 # Caller secrets block:
 #   secrets:
@@ -48,10 +49,45 @@
 # devops-excellence public-private-reusable fitness check permits). The
 # token-minting actions are SHA-pinned per ADR-045.
 #
-# This workflow NEVER blocks a PR. If credentials are absent or invalid, or if
-# `gh pr merge --auto` fails, an annotation is emitted and the job exits 0.
-# Token-generation failures emit `::error::`; soft remediation paths emit
-# `::warning::`. The real quality gates are the CI checks.
+# Failure contract (changed by issues #17 / #23 — read before editing a guard)
+# ---------------------------------------------------------------------------
+# This workflow does not block a PR because it is never a REQUIRED status check
+# on any consumer — that, not an unconditional `exit 0`, is the mechanism.
+# Verified across all 51 consuming repos, via both repository rulesets and
+# classic branch protection: zero list an auto-merge context as required. A
+# required-check misconfiguration in one consumer is a one-line fix; a swallowed
+# exit code is invisible by construction. Issue #24 turns that sweep into an
+# enforced check rather than a point-in-time reading.
+#
+# Given that, a job ends RED whenever auto-merge was supposed to arm and did not:
+#   * the 1Password PEM read failed — missing/empty OP_AUTOMERGE_PUBLIC_TOKEN, or
+#     this repo absent from the org secret's selected-repositories list
+#   * actions/create-github-app-token failed despite a good PEM
+#   * `gh pr merge --auto` exited non-zero, or returned success while the PR's
+#     `autoMergeRequest` stayed unset (e.g. "Allow auto-merge" is off on the repo)
+# Each emits `::error::` carrying its remediation, then exits 1.
+#
+# A job stays GREEN with a `::warning::` only where skipping is the intended
+# outcome rather than a malfunction:
+#   * vars.IP_AUTOMERGE_APP_ID / _APP_CLIENT_ID unset — the ip-automerge App is
+#     not provisioned for this repo at all, a legitimate opt-out state
+#   * dependabot/fetch-metadata could not verify the PR's commits (#16 / #18)
+#   * the bump is semver-major — human review is required by design
+#
+# Why not `exit 0` unconditionally, as this file did until #17: the old guard
+# tested `steps.app-token.outcome == 'failure'`, but a step skipped by its own
+# `if:` reports `skipped`, not `failure`. So when the PEM read failed the guard
+# could never fire, every step that ran succeeded, and the job went green with
+# nothing armed and no annotation. Guards below therefore use `!cancelled()` and
+# assert on the outcome of the step that actually failed. The real quality gates
+# remain the consumer's own CI checks.
+#
+# YAML footgun, if you edit a guard: `if: !cancelled() && …` does NOT parse. A
+# leading `!` opens a YAML tag and the following `&&` is then read as an anchor,
+# so the whole file dies before Actions ever evaluates it. Single-line guards are
+# therefore written `if: ${{ !cancelled() && … }}`. Inside a `|` block scalar the
+# indicators are inert, so the multi-line guard is left bare — matching the
+# `Generate App token` steps. Do not "tidy" either form into the other.
 
 name: Reusable Auto-Merge
 
@@ -100,21 +136,38 @@ jobs:
         id: pem
         if: steps.app_id_check.outputs.ready == 'true'
         continue-on-error: true
-        # `continue-on-error: true` preserves the "NEVER blocks a PR" contract;
-        # downstream token-mint is gated on success. A missing/empty scoped
-        # token (pre-ip-bots#207) fails here and cleanly skips the merge.
+        # `continue-on-error: true` is kept so the failure is reported by the
+        # guard below — which carries the remediation — rather than by this
+        # action's raw output. It does NOT mean the failure is tolerated: the
+        # guard exits 1. See the failure contract in the header.
         uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
         with:
           op-service-account-token: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
           item-path: op://ip-automation-public/ip-automerge/private_key
 
+      - name: Assert the App PEM was read
+        # `!cancelled()` is load-bearing (#17). Any status-check function here
+        # replaces the implicit `success() &&`, so this step still runs after an
+        # upstream step fails or is SKIPPED — and a step skipped by its own `if:`
+        # reports outcome `skipped`, not `failure`, which is exactly what the old
+        # guard could not see. Asserting on the PEM step's own outcome, rather
+        # than on the token step it gates, is the actual fix. `!cancelled()`
+        # rather than `always()` so cancelling a run doesn't stamp a spurious
+        # error on it.
+        if: ${{ !cancelled() && steps.app_id_check.outputs.ready == 'true' && steps.pem.outcome != 'success' }}
+        run: |
+          echo "::error::Could not read the ip-automerge App PEM from 1Password (op://ip-automation-public/ip-automerge/private_key) — auto-merge was NOT armed on this PR. Most likely secrets.OP_AUTOMERGE_PUBLIC_TOKEN is unset or empty on this repo, or this repo is missing from the org secret's selected-repositories list. Fix: gh secret set OP_AUTOMERGE_PUBLIC_TOKEN --org Integral-Productivity --repos <this-repo>. See ADR-045 and ip-bots#207."
+          exit 1
+
       - name: Fetch Dependabot metadata
         id: meta
         # `dependabot/fetch-metadata` refuses to proceed when a PR's commits
         # aren't cryptographically verified as Dependabot-signed (see #16/#18).
-        # `continue-on-error: true` keeps the "NEVER blocks" contract; the
-        # downstream mint gates on steps.meta.outcome == 'success', so
-        # unverified PRs cleanly fall through to manual review.
+        # This is the one genuinely soft path in this job: an unverified PR is a
+        # PR that SHOULD fall through to human review, not a malfunction. So it
+        # stays green — `continue-on-error: true`, the mint gates on
+        # steps.meta.outcome == 'success', and the reason is announced as a
+        # `::warning::` by "Explain a skipped mint" below.
         if: steps.app_id_check.outputs.ready == 'true' && steps.pem.outcome == 'success'
         continue-on-error: true
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
@@ -134,12 +187,32 @@ jobs:
           client-id: ${{ vars.IP_AUTOMERGE_APP_CLIENT_ID }}
           private-key: ${{ steps.pem.outputs.private-key }}
 
-      - name: Error if token generation failed
-        if: steps.app-token.outcome == 'failure'
+      - name: Assert the App token was minted
+        if: ${{ !cancelled() && steps.app-token.outcome == 'failure' }}
         # Literal block scalar (`|`) so the `#14` reference isn't truncated by
         # YAML's comment parser (see devops-excellence #109 fix).
         run: |
-          echo "::error::App token generation failed — PEM was read from 1P at op://ip-automation/ip-automerge/private_key, but actions/create-github-app-token still failed. Check that vars.IP_AUTOMERGE_APP_CLIENT_ID is set at the org level and that the ip-automerge App is installed on this repo. See devops-excellence issue #14 for the silent-failure history."
+          echo "::error::App token generation failed — the PEM was read from 1Password successfully, but actions/create-github-app-token still failed, so auto-merge was NOT armed. Check that vars.IP_AUTOMERGE_APP_CLIENT_ID is set at the org level and that the ip-automerge App is installed on this repo. See devops-excellence issue #14 for the silent-failure history."
+          exit 1
+
+      - name: Explain a skipped mint
+        # The token step is also skipped for two BY-DESIGN reasons. Those stay
+        # green — but they must still say so, or a Dependabot PR that quietly
+        # never auto-merges looks identical to one that did.
+        if: |
+          !cancelled()
+          && steps.app_id_check.outputs.ready == 'true'
+          && steps.pem.outcome == 'success'
+          && steps.app-token.outcome == 'skipped'
+        env:
+          META_OUTCOME: ${{ steps.meta.outcome }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+        run: |
+          if [ "$META_OUTCOME" != "success" ]; then
+            echo "::warning::dependabot/fetch-metadata did not succeed (outcome: ${META_OUTCOME}) — this PR's commits could not be verified as Dependabot-signed, so auto-merge was skipped by design. Review and merge manually. See issues #16 / #18."
+          else
+            echo "::warning::Update type '${UPDATE_TYPE}' is neither semver-patch nor semver-minor — auto-merge was skipped by design. Major bumps require human review."
+          fi
 
       - name: Enable auto-merge (squash)
         if: steps.app-token.outcome == 'success'
@@ -147,8 +220,27 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          gh pr merge --auto --squash "$PR_URL" || \
-            echo "::warning::gh pr merge --auto failed — merge manually if needed"
+          if ! gh pr merge --auto --squash "$PR_URL"; then
+            echo "::error::gh pr merge --auto exited non-zero — auto-merge was NOT armed on this PR. The most common cause is that 'Allow auto-merge' is disabled in this repository's settings. Fix: gh api -X PATCH repos/{owner}/{repo} -F allow_auto_merge=true"
+            exit 1
+          fi
+          # Trust the command's exit code for nothing (#23): re-read the PR and
+          # confirm auto-merge is actually queued. `gh pr merge --auto` exits 0
+          # on paths that arm nothing. MERGED is also a success — when every
+          # required check has already passed, --auto merges immediately and
+          # leaves autoMergeRequest null.
+          pr_json="$(gh pr view "$PR_URL" --json state,autoMergeRequest)"
+          armed="$(printf '%s' "$pr_json" | jq -r '.autoMergeRequest != null')"
+          state="$(printf '%s' "$pr_json" | jq -r '.state')"
+          if [ "$armed" != "true" ] && [ "$state" != "MERGED" ]; then
+            echo "::error::gh pr merge --auto reported success, but this PR's autoMergeRequest is still unset and its state is ${state} — auto-merge is NOT armed. Merge manually and investigate; this is the silent path tracked by issue #23."
+            exit 1
+          fi
+          if [ "$state" = "MERGED" ]; then
+            echo "PR is already MERGED — every required check had passed, so --auto merged it immediately."
+          else
+            echo "Auto-merge armed (state: ${state})."
+          fi
 
   claude-branches:
     name: Auto-merge claude/* branches
@@ -182,10 +274,18 @@ jobs:
         id: pem
         if: steps.app_id_check.outputs.ready == 'true'
         continue-on-error: true
+        # See the Dependabot job's identical step for why continue-on-error stays.
         uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
         with:
           op-service-account-token: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
           item-path: op://ip-automation-public/ip-automerge/private_key
+
+      - name: Assert the App PEM was read
+        # `!cancelled()` is load-bearing — see the Dependabot job's identical guard.
+        if: ${{ !cancelled() && steps.app_id_check.outputs.ready == 'true' && steps.pem.outcome != 'success' }}
+        run: |
+          echo "::error::Could not read the ip-automerge App PEM from 1Password (op://ip-automation-public/ip-automerge/private_key) — auto-merge was NOT armed on this PR. Most likely secrets.OP_AUTOMERGE_PUBLIC_TOKEN is unset or empty on this repo, or this repo is missing from the org secret's selected-repositories list. Fix: gh secret set OP_AUTOMERGE_PUBLIC_TOKEN --org Integral-Productivity --repos <this-repo>. See ADR-045 and ip-bots#207."
+          exit 1
 
       - name: Generate App token
         id: app-token
@@ -198,11 +298,12 @@ jobs:
           client-id: ${{ vars.IP_AUTOMERGE_APP_CLIENT_ID }}
           private-key: ${{ steps.pem.outputs.private-key }}
 
-      - name: Error if token generation failed
-        if: steps.app-token.outcome == 'failure'
+      - name: Assert the App token was minted
+        if: ${{ !cancelled() && steps.app-token.outcome == 'failure' }}
         # Literal block scalar — see Dependabot job's identical step.
         run: |
-          echo "::error::App token generation failed — PEM was read from 1P at op://ip-automation/ip-automerge/private_key, but actions/create-github-app-token still failed. Check that vars.IP_AUTOMERGE_APP_CLIENT_ID is set at the org level and that the ip-automerge App is installed on this repo. See devops-excellence issue #14 for the silent-failure history."
+          echo "::error::App token generation failed — the PEM was read from 1Password successfully, but actions/create-github-app-token still failed, so auto-merge was NOT armed. Check that vars.IP_AUTOMERGE_APP_CLIENT_ID is set at the org level and that the ip-automerge App is installed on this repo. See devops-excellence issue #14 for the silent-failure history."
+          exit 1
 
       - name: Enable auto-merge (squash)
         if: steps.app-token.outcome == 'success'
@@ -222,7 +323,23 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          gh pr merge --auto --squash "$PR_URL" \
+          if ! gh pr merge --auto --squash "$PR_URL" \
             --subject "${PR_TITLE} (#${PR_NUMBER})" \
-            --body "${PR_BODY}" || \
-            echo "::warning::gh pr merge --auto failed — merge manually if needed"
+            --body "${PR_BODY}"; then
+            echo "::error::gh pr merge --auto exited non-zero — auto-merge was NOT armed on this PR. The most common cause is that 'Allow auto-merge' is disabled in this repository's settings. Fix: gh api -X PATCH repos/{owner}/{repo} -F allow_auto_merge=true"
+            exit 1
+          fi
+          # Trust the command's exit code for nothing (#23) — see the Dependabot
+          # job's identical assertion for why, including why MERGED counts.
+          pr_json="$(gh pr view "$PR_URL" --json state,autoMergeRequest)"
+          armed="$(printf '%s' "$pr_json" | jq -r '.autoMergeRequest != null')"
+          state="$(printf '%s' "$pr_json" | jq -r '.state')"
+          if [ "$armed" != "true" ] && [ "$state" != "MERGED" ]; then
+            echo "::error::gh pr merge --auto reported success, but this PR's autoMergeRequest is still unset and its state is ${state} — auto-merge is NOT armed. Merge manually and investigate; this is the silent path tracked by issue #23."
+            exit 1
+          fi
+          if [ "$state" = "MERGED" ]; then
+            echo "PR is already MERGED — every required check had passed, so --auto merged it immediately."
+          else
+            echo "Auto-merge armed (state: ${state})."
+          fi
