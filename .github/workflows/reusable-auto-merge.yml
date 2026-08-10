@@ -372,7 +372,10 @@ jobs:
   # OP_LABELER_PUBLIC_TOKEN instead of the whole-vault OP_SERVICE_ACCOUNT_TOKEN
   # the private copy uses — see the header credential-surface note above. The
   # resolve-with-retry kernel below is a VERBATIM COPY of the private job's;
-  # keep the two in sync by hand (no shared test harness across repos yet).
+  # keep the two in sync by hand (no shared test harness across repos yet). The
+  # one intentional deviation is a `shellcheck disable=SC2016` comment on the
+  # graphql query step — this repo's actionlint runs shellcheck as a required
+  # check and the private repo's doesn't, so that line only exists here.
   close-linked-issues:
     name: Close linked issues (ip-labeler)
     runs-on: ubuntu-latest
@@ -428,6 +431,11 @@ jobs:
           # path-trigger). In the test the `gh api graphql` call is replaced by
           # a PATH stub; everything else runs exactly as shipped. =====
           resolve_once() {
+            # shellcheck disable=SC2016 -- $owner/$repo/$pr are GraphQL variable
+            # refs inside a single-quoted -f query string, not shell expansions.
+            # This repo's actionlint (unlike the private original's CI) runs
+            # shellcheck and treats findings as failures, so this disable is the
+            # one intentional deviation from the VERBATIM COPY note above.
             gh api graphql -f query='
                 query($owner: String!, $repo: String!, $pr: Int!) {
                   repository(owner: $owner, name: $repo) {
