@@ -43,11 +43,22 @@
 # Caller secrets block:
 #   secrets:
 #     OP_AUTOMERGE_PUBLIC_TOKEN: ${{ secrets.OP_AUTOMERGE_PUBLIC_TOKEN }}
+#     OP_LABELER_PUBLIC_TOKEN: ${{ secrets.OP_LABELER_PUBLIC_TOKEN }}
 #
 # The PEM read is centralized in the PUBLIC `read-pem-from-1p` composite action
 # in this repo, referenced by full public path (public->public, which the
 # devops-excellence public-private-reusable fitness check permits). The
 # token-minting actions are SHA-pinned per ADR-045.
+#
+# A SECOND scoped token, `OP_LABELER_PUBLIC_TOKEN`, follows the identical
+# ADR-045 pattern but for the `ip-labeler` PEM (devops-excellence#519 /
+# ADR-075): scoped read-only to its own dedicated `ip-labeler-public` vault
+# (never the same vault as OP_AUTOMERGE_PUBLIC_TOKEN — 1P service accounts are
+# vault-scoped, not item-scoped, so sharing a vault would let either token read
+# both PEMs). It powers ONLY the `close-linked-issues` job below, which mints
+# an `ip-labeler` token (issues:write) — `ip-automerge` deliberately holds
+# none, per ip-bots ADR-026, so the merge identity can never close the issues
+# it merges. A leak of this token mints only `ip-labeler` (issues:write).
 #
 # Failure contract (changed by issues #17 / #23 — read before editing a guard)
 # ---------------------------------------------------------------------------
@@ -97,6 +108,9 @@ on:
       OP_AUTOMERGE_PUBLIC_TOKEN:
         description: 'Scoped 1Password service-account token, read-only on the ip-automation-public vault (which holds ONLY the ip-automerge PEM) per ADR-045 / ip-bots#207. Declared required:false so a missing token degrades gracefully instead of a 0-second startup_failure; the PEM read fails closed.'
         required: false
+      OP_LABELER_PUBLIC_TOKEN:
+        description: 'Scoped 1Password service-account token, read-only on the ip-labeler-public vault (which holds ONLY the ip-labeler PEM) per ADR-075 / devops-excellence#519. Powers the close-linked-issues job only. Declared required:false so a missing token degrades gracefully (that job emits a warning and skips) instead of a 0-second startup_failure.'
+        required: false
 
 permissions:
   contents: write
@@ -106,7 +120,12 @@ jobs:
   dependabot:
     name: Auto-merge Dependabot (patch/minor)
     runs-on: ubuntu-latest
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    # `github.event.action != 'closed'` added alongside the `closed` event type
+    # (devops-excellence#519, so close-linked-issues below can run) — without
+    # this exclusion a closed/merged Dependabot PR would re-enter this job and
+    # attempt `gh pr merge --auto` on an already-merged PR, failing loudly for
+    # no reason. Mirrors the private copy's identical guard.
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.action != 'closed'
     steps:
       - name: Verify org variable identifiers are configured
         id: app_id_check
@@ -245,7 +264,11 @@ jobs:
   claude-branches:
     name: Auto-merge claude/* branches
     runs-on: ubuntu-latest
-    if: startsWith(github.head_ref, 'claude/')
+    # `github.event.action != 'closed'` added alongside the `closed` event type
+    # (devops-excellence#519, so close-linked-issues below can run) — mirrors
+    # the private copy's identical guard; see the Dependabot job's comment for
+    # why the exclusion is needed.
+    if: startsWith(github.head_ref, 'claude/') && github.event.action != 'closed'
     steps:
       - name: Verify org variable identifiers are configured
         id: app_id_check
@@ -306,7 +329,7 @@ jobs:
           exit 1
 
       - name: Enable auto-merge (squash)
-        if: steps.app-token.outcome == 'success'
+        if: steps.app-token.outcome == 'success' && github.event.action != 'closed'
         # Pass --subject and --body so the PR body — including any "Closes #N"
         # keywords — lands on `main` as the squash commit body (GitHub's default
         # squash format drops the PR body, breaking auto-close of linked issues
@@ -343,3 +366,209 @@ jobs:
           else
             echo "Auto-merge armed (state: ${state})."
           fi
+
+  # Public-host counterpart of devops-excellence's close-linked-issues job
+  # (devops-excellence#519 / ADR-075). Mints an ip-labeler token via the scoped
+  # OP_LABELER_PUBLIC_TOKEN instead of the whole-vault OP_SERVICE_ACCOUNT_TOKEN
+  # the private copy uses — see the header credential-surface note above. The
+  # resolve-with-retry kernel below is a VERBATIM COPY of the private job's;
+  # keep the two in sync by hand (no shared test harness across repos yet).
+  close-linked-issues:
+    name: Close linked issues (ip-labeler)
+    runs-on: ubuntu-latest
+    # Only fire when a claude/* branch PR is actually merged into the default
+    # branch. Dependabot PRs don't carry manual `Closes #N` keywords and are
+    # excluded. This job implements ip-bots ADR-026: ip-automerge deliberately
+    # holds no issues:write, so closing must be performed by ip-labeler.
+    if: >-
+      github.event.action == 'closed'
+      && github.event.pull_request.merged == true
+      && startsWith(github.head_ref, 'claude/')
+      && github.event.pull_request.base.ref == github.event.repository.default_branch
+    steps:
+      - name: Resolve closing-issue references via GitHub's linked-issue graph
+        id: keywords
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          # Retry knobs (env-overridable). GitHub populates
+          # closingIssuesReferences asynchronously after merge, and this job
+          # starts within seconds of the merge — so a single query can see an
+          # empty set for a PR that genuinely closes an issue (#339: the SAE
+          # incident; the linkage was still empty ~20s post-merge in a related
+          # case). Retry with linear backoff before concluding "nothing to
+          # close". Defaults: 9 attempts, 3s * attempt → up to ~108s of total
+          # wait. Widened from the original 6/~45s (#350: PR #348, which
+          # documented this very mechanism, hit the 45s cap in production —
+          # propagation completed shortly after, but past the old window,
+          # forcing a red run + manual close). This job runs post-merge and
+          # blocks nothing, so the wider window only costs job runtime.
+          RESOLVE_ATTEMPTS: '9'
+          RESOLVE_BASE_DELAY_SECONDS: '3'
+        run: |
+          set -euo pipefail
+          # closingIssuesReferences is populated by GitHub's own body parser —
+          # the same one that decides whether a merge auto-closes an issue — so
+          # it excludes code spans and negated mentions that a raw-body regex
+          # would false-match (#334). We filter to same-repo issues only
+          # (cross-repo `owner/repo#N` refs are left to GitHub's native
+          # auto-close, since `gh issue close` below assumes $REPO).
+          #
+          # The repo comparison is interpolated into the --jq expression (not
+          # via jq's `--arg`): `gh api`'s `--jq` flag takes a single filter
+          # string and has no `--arg` support, so `--arg repo "$X" '<filter>'`
+          # mis-parses into positional args and errors before any network call
+          # — the bug (#340) that left #334/#337 open past their closing PRs.
+          #
+          # ===== VERBATIM COPY: resolve-with-retry kernel — keep identical to
+          # test-close-linked-issues.yml (drift caught by that test's
+          # path-trigger). In the test the `gh api graphql` call is replaced by
+          # a PATH stub; everything else runs exactly as shipped. =====
+          resolve_once() {
+            gh api graphql -f query='
+                query($owner: String!, $repo: String!, $pr: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      closingIssuesReferences(first: 50) {
+                        nodes { number repository { nameWithOwner } }
+                      }
+                    }
+                  }
+                }' \
+              -f owner="$OWNER" -f repo="$REPO_NAME" -F pr="$PR_NUMBER" \
+              --jq "[.data.repository.pullRequest.closingIssuesReferences.nodes[]
+                  | select(.repository.nameWithOwner == \"${OWNER}/${REPO_NAME}\") | .number]
+                 | sort | unique | .[]" \
+              | tr '\n' ' ' | xargs
+          }
+
+          resolve_with_retry() {
+            # $1=attempts $2=base_delay_seconds. Echoes the resolved issue list
+            # (possibly empty). Returns a populated result immediately; only an
+            # empty result is retried (absorbs propagation lag). A failed
+            # `gh api` (transient network) counts as empty and is retried too.
+            _attempts="$1"; _base="$2"; _result=""; _attempt=1
+            while :; do
+              _result="$(resolve_once || true)"
+              [ -n "$_result" ] && break
+              [ "$_attempt" -ge "$_attempts" ] && break
+              _delay=$(( _base * _attempt ))
+              echo "closingIssuesReferences empty on attempt ${_attempt}/${_attempts}; GitHub's linked-issue graph may still be propagating — retrying in ${_delay}s…" >&2
+              sleep "$_delay"
+              _attempt=$(( _attempt + 1 ))
+            done
+            printf '%s' "$_result"
+          }
+
+          body_has_same_repo_closing_keyword() {
+            # Exit 0 if the PR body ($1) declares a same-repo closing keyword
+            # ("Closes #N" etc. with a bare numeric ref). Used ONLY to decide
+            # whether an empty resolve is suspicious — never to close (closing
+            # stays on closingIssuesReferences, preserving #334). A cross-repo
+            # "owner/repo#N" won't match, matching this job's same-repo scope.
+            printf '%s' "${1:-}" \
+              | grep -iEq '(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+#[0-9]+'
+          }
+          # ===== END VERBATIM COPY =====
+
+          ISSUES="$(resolve_with_retry "${RESOLVE_ATTEMPTS}" "${RESOLVE_BASE_DELAY_SECONDS}")"
+          echo "issues=${ISSUES}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${ISSUES}" ]; then
+            echo "suspected_race=false" >> "$GITHUB_OUTPUT"
+            echo "Issues to close: ${ISSUES}"
+          elif body_has_same_repo_closing_keyword "${PR_BODY:-}"; then
+            # Empty after retries, but the body says it should have closed
+            # something → the propagation race never cleared (or a malformed
+            # ref). Flag it; the next step turns this into a loud red failure
+            # instead of a silent skip (#339).
+            echo "suspected_race=true" >> "$GITHUB_OUTPUT"
+            echo "PR body declares a same-repo closing keyword, but closingIssuesReferences resolved no issue after ${RESOLVE_ATTEMPTS} attempts."
+          else
+            # Genuinely no linked issue — not every claude/* PR closes one.
+            echo "suspected_race=false" >> "$GITHUB_OUTPUT"
+            echo "No linked closing issues found and no closing keyword in the PR body — nothing to close."
+          fi
+
+      - name: Verify ip-labeler org variable identifiers are configured
+        id: labeler_check
+        if: steps.keywords.outputs.issues != ''
+        env:
+          APP_ID: ${{ vars.IP_LABELER_APP_ID }}
+          CLIENT_ID: ${{ vars.IP_LABELER_APP_CLIENT_ID }}
+        run: |
+          missing=0
+          if [ -z "${APP_ID:-}" ]; then
+            echo "::warning::vars.IP_LABELER_APP_ID is not set on this repo or the org. Cannot close linked issues. Fix: gh variable set IP_LABELER_APP_ID --org Integral-Productivity --visibility all --body '<numeric-app-id>'"
+            missing=1
+          fi
+          if [ -z "${CLIENT_ID:-}" ]; then
+            echo "::warning::vars.IP_LABELER_APP_CLIENT_ID is not set on this repo or the org. Cannot close linked issues."
+            missing=1
+          fi
+          if [ "$missing" = "1" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read ip-labeler App PEM from 1Password
+        id: pem
+        if: steps.keywords.outputs.issues != '' && steps.labeler_check.outputs.ready == 'true'
+        continue-on-error: true
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        with:
+          op-service-account-token: ${{ secrets.OP_LABELER_PUBLIC_TOKEN }}
+          item-path: op://ip-labeler-public/ip-labeler/private_key
+
+      - name: Generate ip-labeler App token
+        id: app-token
+        if: steps.keywords.outputs.issues != '' && steps.labeler_check.outputs.ready == 'true' && steps.pem.outcome == 'success'
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_LABELER_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+
+      - name: Close linked issues
+        if: steps.keywords.outputs.issues != '' && steps.app-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUES: ${{ steps.keywords.outputs.issues }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for ISSUE in $ISSUES; do
+            echo "Closing issue #${ISSUE} (linked from PR #${PR_NUMBER})"
+            gh issue comment "$ISSUE" \
+              --repo "$REPO" \
+              --body "Closed by #${PR_NUMBER}." || \
+              echo "::warning::Could not comment on issue #${ISSUE} — continuing"
+            gh issue close "$ISSUE" \
+              --repo "$REPO" \
+              --reason completed || \
+              echo "::warning::Could not close issue #${ISSUE} — continuing"
+          done
+
+      - name: Warn if a closing keyword resolved no issue (propagation race)
+        if: steps.keywords.outputs.issues == '' && steps.keywords.outputs.suspected_race == 'true'
+        # Emits a ::warning:: (NOT ::error:: + exit 1) so the post-merge run
+        # stays GREEN. Before #396 this failed red to make the miss loud and
+        # force a manual close; now the linked-issue-unclosed scan reconciles
+        # it — once GitHub's closingIssuesReferences graph finishes propagating
+        # (which can outlast any fixed inline retry window, #350), the daily
+        # scan resolves the same graph and AUTO-CLOSES the issue (ADR-062).
+        # The warning remains visible in the Checks UI for immediate awareness;
+        # no human action is needed unless the scan also can't resolve it (a
+        # malformed reference), which the scan surfaces separately.
+        # This job runs on the pull_request `closed` event AFTER the merge, so
+        # it never blocks the PR either way (the merge already happened).
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "::warning::close-linked-issues: PR #${PR_NUMBER} (${REPO}) merged with a same-repo closing keyword, but GitHub's closingIssuesReferences graph resolved no linked issue within the inline retry window — likely propagation lag (#339/#396). The linked issue may still be OPEN now; the daily linked-issue-unclosed scan will auto-close it once the graph propagates (ADR-062). Verify if needed: gh pr view ${PR_NUMBER} --repo ${REPO} --json closingIssuesReferences."
