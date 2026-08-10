@@ -431,11 +431,12 @@ jobs:
           # path-trigger). In the test the `gh api graphql` call is replaced by
           # a PATH stub; everything else runs exactly as shipped. =====
           resolve_once() {
-            # shellcheck disable=SC2016 -- $owner/$repo/$pr are GraphQL variable
-            # refs inside a single-quoted -f query string, not shell expansions.
-            # This repo's actionlint (unlike the private original's CI) runs
-            # shellcheck and treats findings as failures, so this disable is the
-            # one intentional deviation from the VERBATIM COPY note above.
+            # $owner/$repo/$pr below are GraphQL variable refs inside a
+            # single-quoted -f query string, not shell expansions. This repo's
+            # actionlint (unlike the private original's CI) runs shellcheck and
+            # treats findings as failures, so the directive on the next line is
+            # the one intentional deviation from the VERBATIM COPY note above.
+            # shellcheck disable=SC2016
             gh api graphql -f query='
                 query($owner: String!, $repo: String!, $pr: Int!) {
                   repository(owner: $owner, name: $repo) {
