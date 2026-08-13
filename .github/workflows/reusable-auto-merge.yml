@@ -437,7 +437,22 @@ jobs:
             # treats findings as failures, so the directive on the next line is
             # the one intentional deviation from the VERBATIM COPY note above.
             # shellcheck disable=SC2016
-            gh api graphql -f query='
+            #
+            # Capture gh's own stdout into a variable BEFORE any further
+            # processing, and gate on ITS exit status alone — do not pipe
+            # straight into tr/xargs. A pipe leaks its stdout to the caller
+            # regardless of the pipeline's eventual exit code, so a naive
+            # `resolve_once ... | tr ... | xargs || { echo diag; return $rc; }`
+            # still emits whatever `gh` printed (a GraphQL error BODY on a
+            # genuine failure, e.g. `{data:{...:null},errors:[...]}`) as
+            # "successful" output — resolve_with_retry then treats that
+            # garbage as a populated, non-empty result and stops retrying
+            # (confirmed live in devops-excellence#536's own fix: shipped one
+            # merge as literal `Closing issue #not`, `#accessible`, `#by`,
+            # word-split from a FORBIDDEN error body; each was harmlessly
+            # rejected downstream as "invalid issue format", but only by luck
+            # of the words not being numeric).
+            _raw="$(gh api graphql -f query='
                 query($owner: String!, $repo: String!, $pr: Int!) {
                   repository(owner: $owner, name: $repo) {
                     pullRequest(number: $pr) {
@@ -450,8 +465,9 @@ jobs:
               -f owner="$OWNER" -f repo="$REPO_NAME" -F pr="$PR_NUMBER" \
               --jq "[.data.repository.pullRequest.closingIssuesReferences.nodes[]
                   | select(.repository.nameWithOwner == \"${OWNER}/${REPO_NAME}\") | .number]
-                 | sort | unique | .[]" \
-              | tr '\n' ' ' | xargs
+                 | sort | unique | .[]")" \
+              || { _rc=$?; echo "resolve_once: gh api graphql failed (exit ${_rc}) — this is a GENUINE API error (e.g. an unexpected token/scope problem or a malformed query), NOT propagation lag; see the gh/GraphQL error above this line for the cause." >&2; return "$_rc"; }
+            printf '%s' "$_raw" | tr '\n' ' ' | xargs
           }
 
           resolve_with_retry() {
