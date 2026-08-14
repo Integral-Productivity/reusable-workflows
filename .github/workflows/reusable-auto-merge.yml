@@ -288,6 +288,27 @@ jobs:
     # why the exclusion is needed.
     if: startsWith(github.head_ref, 'claude/') && github.event.action != 'closed'
     steps:
+      - name: Check hold-for-review label
+        id: hold_check
+        # devops-excellence#520: a human (or an agent judging its own PR
+        # content-sensitive) can apply this label to opt a specific claude/*
+        # PR out of auto-merge, regardless of CI status. Computed fresh from
+        # the event payload on every trigger — including `labeled`/`unlabeled`
+        # (added to the caller's pull_request.types alongside this check) — so
+        # applying or removing the label on an already-open PR takes effect
+        # without needing a new push. See ADR-079 and the "Branch and PR
+        # Conventions" section of devops-excellence's CLAUDE.md for when to
+        # use it.
+        env:
+          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$LABELS_JSON" | jq -e 'any(. == "hold-for-review")' > /dev/null; then
+            echo "held=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "held=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Verify org variable identifiers are configured
         id: app_id_check
         # Mirrors the Dependabot job's precheck — see that job for context.
@@ -347,7 +368,7 @@ jobs:
           exit 1
 
       - name: Enable auto-merge (squash)
-        if: steps.app-token.outcome == 'success' && github.event.action != 'closed'
+        if: steps.app-token.outcome == 'success' && github.event.action != 'closed' && steps.hold_check.outputs.held != 'true'
         # Pass --subject and --body so the PR body — including any "Closes #N"
         # keywords — lands on `main` as the squash commit body (GitHub's default
         # squash format drops the PR body, breaking auto-close of linked issues
@@ -384,6 +405,22 @@ jobs:
           else
             echo "Auto-merge armed (state: ${state})."
           fi
+
+      - name: Disarm auto-merge for a held PR
+        # If the label lands on a PR that already had auto-merge armed from an
+        # earlier push (or via `labeled`, which re-runs this job), cancel the
+        # pending merge rather than leaving it queued to complete on the next
+        # green check. `--disable-auto` is idempotent — safe to call even when
+        # nothing is armed — so this never fails a PR that was already held
+        # from the start. Requires the App token (same one that would have
+        # armed it), so it's gated on app-token succeeding, not on held alone.
+        if: steps.app-token.outcome == 'success' && github.event.action != 'closed' && steps.hold_check.outputs.held == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          echo "::notice::This PR carries the hold-for-review label — auto-merge was skipped by design. Remove the label and push a new commit (or re-apply/remove the label) to re-arm auto-merge."
+          gh pr merge --disable-auto "$PR_URL" || true
 
   # Public-host counterpart of devops-excellence's close-linked-issues job
   # (devops-excellence#519 / ADR-075). Mints an ip-labeler token via the scoped
