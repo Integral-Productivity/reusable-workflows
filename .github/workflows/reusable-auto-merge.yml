@@ -296,7 +296,7 @@ jobs:
         # the event payload on every trigger — including `labeled`/`unlabeled`
         # (added to the caller's pull_request.types alongside this check) — so
         # applying or removing the label on an already-open PR takes effect
-        # without needing a new push. See ADR-079 and the "Branch and PR
+        # without needing a new push. See ADR-080 and the "Branch and PR
         # Conventions" section of devops-excellence's CLAUDE.md for when to
         # use it.
         env:
