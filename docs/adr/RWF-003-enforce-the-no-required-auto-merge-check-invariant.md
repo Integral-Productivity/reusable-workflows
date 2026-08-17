@@ -77,17 +77,25 @@ benign case) as a required check. This was a real bug in the original hand
 sweep's first pass — caught before publishing, but worth carrying forward as
 an explicit design constraint rather than rediscovering it.
 
-**4. The match is `auto.merge`, case-insensitive** (issue #24's literal
-scope) — the `.` standing in for whichever separator a caller's job id uses
-(`auto-merge`, `auto_merge`, `auto merge`).
+**4. The match is `auto.?merge`, case-insensitive** — issue #24's literal
+scope named `auto.merge` (a required one-character separator), but that
+mechanically cannot match a zero-separator job id like `automerge`, so the
+pattern widens to an optional single character (`.?`). All of `auto-merge`,
+`auto_merge`, `auto merge`, and `automerge` match.
 
 **5. Cross-repo reads use the `ip-org-auditor` App**, minted the same way
 `reusable-auto-merge.yml`'s `close-linked-issues` job already does (PEM at
 `op://ip-org-auditor-public/ip-org-auditor/private_key`, org variable
 `IP_ORG_AUDITOR_APP_CLIENT_ID`) — reusing an existing identity rather than
 provisioning a new one. Both the rulesets and classic-branch-protection read
-endpoints require `administration: read` on the target repo, a scope this
-App is not yet confirmed to hold in every consumer beyond what its existing
+endpoints require `administration: read` on the target repo, and the
+enumeration step's `gh search code` call requires `contents: read` on each
+target repo to search its file content — without `contents:read`, a
+*private* consumer is silently absent from the enumerated list rather than
+producing an error, because public code remains searchable regardless of
+the caller's own scope, so the existing zero-repos guard never fires. Both
+scopes are named explicitly here as required preconditions. This App is not
+yet confirmed to hold either in every consumer, beyond what its existing
 `pull-requests:read` / `issues:read` usage proves. **This is an open
 precondition, not a design gap**: until confirmed, the workflow fails loudly
 at token mint or at the script's own gap reporting, with an actionable

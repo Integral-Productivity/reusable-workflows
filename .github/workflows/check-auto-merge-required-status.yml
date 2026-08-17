@@ -24,15 +24,20 @@
 # list, the same as any consumer). The ip-org-auditor App itself must also
 # hold `administration: read` at the org level (or on every consumer repo)
 # — the permission both the rulesets and classic-branch-protection read
-# endpoints require. Elsewhere in this repo ip-org-auditor is minted only
+# endpoints require — AND `contents: read`, which the enumeration step's
+# `gh search code` call needs to search a PRIVATE repo's file content
+# (public code is searchable regardless of caller scope, so a missing
+# `contents:read` silently drops private consumers from the scan rather
+# than erroring). Elsewhere in this repo ip-org-auditor is minted only
 # for `pull-requests:read` + `issues:read` (see reusable-auto-merge.yml's
 # close-linked-issues job); whether it already carries
-# `administration:read` too has not been confirmed from here. Until both
-# are confirmed, expect this job to fail at "Assert the App PEM was read" or
-# "Assert the App token was minted", or at the check script's own gap
-# reporting — each with a legible, actionable error rather than a silent
-# skip. That failure is itself informative: it means the precondition still
-# needs provisioning, not that the check is broken.
+# `administration:read` and `contents:read` too has not been confirmed
+# from here. Until all are confirmed, expect this job to fail at "Assert
+# the App PEM was read" or "Assert the App token was minted", or at the
+# check script's own gap reporting — each with a legible, actionable
+# error rather than a silent skip. That failure is itself informative: it
+# means the precondition still needs provisioning, not that the check is
+# broken.
 name: Check auto-merge required-status guard
 
 on:
@@ -55,6 +60,7 @@ jobs:
   check:
     name: No consumer requires an auto-merge context
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repo
         uses: actions/checkout@v6

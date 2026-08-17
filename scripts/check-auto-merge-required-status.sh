@@ -28,10 +28,13 @@ set -euo pipefail
 
 readonly ORG="Integral-Productivity"
 readonly REUSABLE_FILE="reusable-auto-merge.yml"
-# Case-insensitive; `.` stands in for whatever separator a caller's job id
-# uses (auto-merge, auto_merge, "auto merge"). Taken verbatim from issue #24's
-# scope, which names the match target as `auto.merge`.
-readonly CONTEXT_PATTERN='auto.merge'
+# Case-insensitive; `.?` stands in for whatever separator a caller's job id
+# uses, matching zero or one of any character between `auto` and `merge` —
+# auto-merge, auto_merge, "auto merge", and automerge (zero separator) all
+# match. Issue #24's scope names the match target as `auto.merge`; `.?`
+# widens that by one character so a zero-separator id like `automerge`
+# isn't mechanically unmatchable.
+readonly CONTEXT_PATTERN='auto.?merge'
 
 command -v gh >/dev/null 2>&1 || {
 	echo "error: gh CLI not found" >&2
@@ -58,11 +61,27 @@ scanned=0
 # current, and it misses a caller that references reusable-auto-merge.yml only
 # indirectly (e.g. through a shared template this repo doesn't itself
 # reference by that filename). See RWF-003.
-mapfile -t repos < <(
-	gh search code --owner "$ORG" "$REUSABLE_FILE" --limit 1000 --json repository \
-		--jq '.[].repository.nameWithOwner' 2>/dev/null | sort -u
-)
+#
+# The search runs to a temp file first, rather than straight into `mapfile`
+# via process substitution, specifically to preserve its own exit status —
+# `mapfile -t x < <(cmd)` never surfaces `cmd`'s exit code to the enclosing
+# script, so a partial/truncated result (e.g. `gh` erroring out mid-pagination
+# after returning some results) would otherwise be indistinguishable from a
+# complete list and silently scanned as if it were the whole population.
+search_out="$(mktemp)"
+search_err="$(mktemp)"
+if ! gh search code --owner "$ORG" "$REUSABLE_FILE" --limit 1000 --json repository \
+	--jq '.[].repository.nameWithOwner' >"$search_out" 2>"$search_err"; then
+	echo "::error::gh search code for '${REUSABLE_FILE}' under --owner ${ORG} failed: $(tr '\n' ' ' <"$search_err")"
+	rm -f "$search_out" "$search_err"
+	exit 1
+fi
+mapfile -t repos < <(sort -u "$search_out")
+rm -f "$search_out" "$search_err"
 
+# Second layer of defense: a genuinely empty-but-successful search (exit 0,
+# zero repos) is still refused here, since reusable-auto-merge.yml is known
+# to have dozens of callers.
 if [ "${#repos[@]}" -eq 0 ]; then
 	echo "::error::gh search code for '${REUSABLE_FILE}' under --owner ${ORG} returned zero repos. reusable-auto-merge.yml is known to have dozens of callers, so an empty result means the search itself failed (auth, rate limit, API outage) or the index is stale — not that zero consumers exist. Refusing to report a false all-clear."
 	exit 1
@@ -74,17 +93,27 @@ for repo in "${repos[@]}"; do
 	scanned=$((scanned + 1))
 	err="$(mktemp)"
 
-	if ! default_branch="$(gh api "repos/${repo}" --jq '.default_branch' 2>"$err")"; then
+	# Pulled together: default_branch (for the classic-protection URL below)
+	# and permissions.admin (the caller's own access level on this repo, per
+	# GitHub's authenticated repo-read response) — the latter is needed to
+	# tell a genuine "not protected" 404 apart from a permission-denied 404
+	# on the classic-protection endpoint below.
+	if ! repo_meta="$(gh api "repos/${repo}" --jq '[.default_branch, ((.permissions.admin // false) | tostring)] | @tsv' 2>"$err")"; then
 		gaps+=("${repo}: could not resolve default branch — $(tr '\n' ' ' <"$err")")
 		rm -f "$err"
 		continue
 	fi
+	IFS=$'\t' read -r default_branch has_admin <<<"$repo_meta"
 
-	# -- Repository rulesets (target: branch only). A 200 with `[]` is a real
-	# "no rulesets" answer; any non-zero exit here is an access/API problem,
-	# not evidence of zero rulesets, and is recorded as a coverage gap rather
-	# than silently treated as clean.
-	if ruleset_ids="$(gh api "repos/${repo}/rulesets" --paginate --jq '.[] | select(.target=="branch") | .id' 2>"$err")"; then
+	# -- Repository rulesets (target: branch, enforcement: active only).
+	# `evaluate` is GitHub's own dry-run mode for staging a rule before
+	# turning it on, and `disabled` enforces nothing — neither actually
+	# blocks a PR, so scanning them would flag a safe, intentional dry-run
+	# as a full-severity offender. A 200 with `[]` (after this filter) is a
+	# real "no actively-enforced rulesets" answer; any non-zero exit here is
+	# an access/API problem, not evidence of zero rulesets, and is recorded
+	# as a coverage gap rather than silently treated as clean.
+	if ruleset_ids="$(gh api "repos/${repo}/rulesets" --paginate --jq '.[] | select(.target=="branch" and .enforcement=="active") | .id' 2>"$err")"; then
 		for id in $ruleset_ids; do
 			rerr="$(mktemp)"
 			if ctxs="$(gh api "repos/${repo}/rulesets/${id}" --jq \
@@ -106,23 +135,36 @@ for repo in "${repos[@]}"; do
 	fi
 
 	# -- Classic branch protection. A 404 here means "not protected" — the
-	# common case. `gh` writes that 404's error BODY to stdout, so a naive
-	# line count would misread "Branch not protected" as a required check
-	# (issue #24's stated trap); this gates on the exit code alone and never
-	# parses stdout from a failed call. Any other failure is a coverage gap.
-	cerr="$(mktemp)"
-	if classic_json="$(gh api "repos/${repo}/branches/${default_branch}/protection/required_status_checks" 2>"$cerr")"; then
-		ctxs="$(printf '%s' "$classic_json" | jq -r '.contexts[]?' 2>/dev/null || true)"
-		while IFS= read -r ctx; do
-			[ -z "$ctx" ] && continue
-			if printf '%s' "$ctx" | grep -Eiq "$CONTEXT_PATTERN"; then
-				offenders+=("${repo}|classic branch protection|${ctx}")
-			fi
-		done <<<"$ctxs"
-	elif ! grep -q "HTTP 404" "$cerr"; then
-		gaps+=("${repo}: could not read classic branch protection — $(tr '\n' ' ' <"$cerr")")
+	# common case. But this endpoint requires admin access on the repo, and
+	# GitHub returns that SAME 404 when the caller lacks that access — there
+	# is no way to tell "not protected" apart from "protected but this token
+	# can't read it" from the response alone. So admin access is checked
+	# first, via `has_admin` from the repo-metadata call above; only when it
+	# is true is a 404 trusted as "not protected". Without it, the repo is
+	# recorded as a coverage gap for this check specifically rather than
+	# risking a false "clean". `gh` also writes a 404's error BODY to
+	# stdout, so a naive line count would misread "Branch not protected" as
+	# a required check (issue #24's stated trap); this gates on the exit
+	# code alone and never parses stdout from a failed call. Any other
+	# failure is a coverage gap.
+	if [ "$has_admin" != "true" ]; then
+		gaps+=("${repo}: ip-org-auditor lacks admin access — cannot distinguish 'not protected' from 'protected but unreadable' for classic branch protection")
+	else
+		cerr="$(mktemp)"
+		if classic_json="$(gh api "repos/${repo}/branches/${default_branch}/protection/required_status_checks" 2>"$cerr")"; then
+			ctxs="$(printf '%s' "$classic_json" | jq -r '.contexts[]?' 2>/dev/null || true)"
+			while IFS= read -r ctx; do
+				[ -z "$ctx" ] && continue
+				if printf '%s' "$ctx" | grep -Eiq "$CONTEXT_PATTERN"; then
+					offenders+=("${repo}|classic branch protection|${ctx}")
+				fi
+			done <<<"$ctxs"
+		elif ! grep -q "HTTP 404" "$cerr"; then
+			gaps+=("${repo}: could not read classic branch protection — $(tr '\n' ' ' <"$cerr")")
+		fi
+		rm -f "$cerr"
 	fi
-	rm -f "$err" "$cerr"
+	rm -f "$err"
 done
 
 echo "Scanned ${scanned} repo(s)."
