@@ -82,8 +82,9 @@
 # Verified across all 51 consuming repos, via both repository rulesets and
 # classic branch protection: zero list an auto-merge context as required. A
 # required-check misconfiguration in one consumer is a one-line fix; a swallowed
-# exit code is invisible by construction. Issue #24 turns that sweep into an
-# enforced check rather than a point-in-time reading.
+# exit code is invisible by construction. That sweep is now an enforced,
+# recurring check rather than a point-in-time reading — see
+# check-auto-merge-required-status.yml and RWF-003 (issue #24).
 #
 # Given that, a job ends RED whenever auto-merge was supposed to arm and did not:
 #   * the 1Password PEM read failed — missing/empty OP_AUTOMERGE_PUBLIC_TOKEN, or

@@ -75,6 +75,7 @@ and is cited rather than restated.
 |---|---|
 | [RWF-001](docs/adr/RWF-001-record-architecture-decisions-with-the-rwf-prefix.md) | Record ADRs here, numbered `RWF-NNN`, scoped to hosting concerns. |
 | [RWF-002](docs/adr/RWF-002-pin-consumers-to-the-moving-v1-major-alias.md) | Pin consumers to the moving `@v1` major alias, not `@main`. |
+| [RWF-003](docs/adr/RWF-003-enforce-the-no-required-auto-merge-check-invariant.md) | Enforce with a scheduled sweep that no consumer requires an auto-merge status check. |
 
 ### Creating a new ADR
 
@@ -270,3 +271,13 @@ Preconditions: the `OP_RELEASER_PUBLIC_TOKEN` scoped token (provisioned), the
 `ip-releaser` installed on the target repo with `contents:write`. Standardization
 tracked in
 [devops-excellence#415](https://github.com/Integral-Productivity/devops-excellence/issues/415).
+
+## Self-checks
+
+Unlike everything above, these run against **this repo only** — they are not
+consumable by other repos.
+
+| Workflow | Purpose |
+|---|---|
+| [`ci.yml`](.github/workflows/ci.yml) | Lints this repo's own workflow YAML and `run:` shell with actionlint + shellcheck, on every PR (issue #19). |
+| [`check-auto-merge-required-status.yml`](.github/workflows/check-auto-merge-required-status.yml) | Weekly sweep (+ `workflow_dispatch`) that fails loudly if any consumer requires an auto-merge status check, enforcing the invariant `reusable-auto-merge.yml`'s red-path failure contract depends on. See [RWF-003](docs/adr/RWF-003-enforce-the-no-required-auto-merge-check-invariant.md) (issue #24). |

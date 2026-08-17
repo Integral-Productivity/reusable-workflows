@@ -1,0 +1,94 @@
+# Scheduled fitness check: fails loudly if any consumer of
+# reusable-auto-merge.yml requires an auto-merge status check.
+#
+# Why this exists (issue #24, unblocked once #17/#35 decided that workflow
+# ends a credential failure RED instead of silently green). The safety of
+# that red path rests entirely on one fact this repo did not otherwise
+# enforce: no consumer treats the auto-merge job as a REQUIRED status check.
+# A hand sweep during #17's triage found 0 of 51 consumers did, checked
+# across both enforcement mechanisms (rulesets and classic branch
+# protection). That was a point-in-time reading — nothing stopped a consumer
+# from adding the job to a ruleset later, at which point a missing 1Password
+# token would start BLOCKING every PR in that repo, the exact outcome the
+# "never blocks" contract exists to prevent. This workflow turns that
+# one-time sweep into a recurring, enforced check. See RWF-003 for the
+# enumeration-method decision (and its documented blind spot) and
+# scripts/check-auto-merge-required-status.sh for the check logic.
+#
+# Precondition — NOT YET CONFIRMED PROVISIONED as of this writing. Unlike
+# reusable-auto-merge.yml (a `workflow_call:` reusable whose secrets a
+# *caller* forwards), this workflow runs directly in this repo on a
+# schedule, with no caller — so `secrets.OP_AUDITOR_PUBLIC_TOKEN` and
+# `vars.IP_ORG_AUDITOR_APP_CLIENT_ID` must be set on THIS repo directly (org
+# secret/variable with reusable-workflows in the selected-repositories
+# list, the same as any consumer). The ip-org-auditor App itself must also
+# hold `administration: read` at the org level (or on every consumer repo)
+# — the permission both the rulesets and classic-branch-protection read
+# endpoints require. Elsewhere in this repo ip-org-auditor is minted only
+# for `pull-requests:read` + `issues:read` (see reusable-auto-merge.yml's
+# close-linked-issues job); whether it already carries
+# `administration:read` too has not been confirmed from here. Until both
+# are confirmed, expect this job to fail at "Assert the App PEM was read" or
+# "Assert the App token was minted", or at the check script's own gap
+# reporting — each with a legible, actionable error rather than a silent
+# skip. That failure is itself informative: it means the precondition still
+# needs provisioning, not that the check is broken.
+name: Check auto-merge required-status guard
+
+on:
+  schedule:
+    # Weekly, not daily: this fact only changes when a human edits a
+    # consumer's ruleset or branch protection — an infrequent event, so
+    # daily would just be noise. Wednesday 09:00 UTC is arbitrary, chosen to
+    # avoid weekend and Monday-morning pile-ups.
+    - cron: '0 9 * * 3'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: No consumer requires an auto-merge context
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+
+      - name: Verify org variable identifier is configured
+        env:
+          CLIENT_ID: ${{ vars.IP_ORG_AUDITOR_APP_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLIENT_ID:-}" ]; then
+            echo "::error::vars.IP_ORG_AUDITOR_APP_CLIENT_ID is not set on this repo or the org. This check needs the ip-org-auditor App (read access across consumer repos) to enumerate rulesets and classic branch protection. Fix: gh variable set IP_ORG_AUDITOR_APP_CLIENT_ID --org Integral-Productivity --visibility all --body '<Iv23li...>'."
+            exit 1
+          fi
+
+      - name: Read ip-org-auditor App PEM from 1Password
+        id: pem
+        # No continue-on-error: this job has no PR to protect from a
+        # spurious annotation, so a failed PEM read should stop the run here
+        # with the composite action's own actionable ::error::, matching
+        # promote-stable.yml's hard-fail convention rather than
+        # reusable-auto-merge.yml's soft-fail-then-assert dance.
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        with:
+          op-service-account-token: ${{ secrets.OP_AUDITOR_PUBLIC_TOKEN }}
+          item-path: op://ip-org-auditor-public/ip-org-auditor/private_key
+
+      - name: Generate ip-org-auditor App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_ORG_AUDITOR_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+
+      - name: Run the required-status guard
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: ./scripts/check-auto-merge-required-status.sh
