@@ -78,3 +78,11 @@ jobs:
       # noted on issue #19.
       - name: Lint workflow YAML and `run:` shell
         run: ./actionlint -color -verbose
+
+      # scripts/check-auto-merge-required-status.test.sh pins down the
+      # classic-branch-protection 404-vs-failure disambiguation (RWF-003
+      # decision 3) with a fake `gh` shim — no external test framework, no
+      # network. `jq` ships on ubuntu-latest alongside the shellcheck this
+      # job already relies on above.
+      - name: Test check-auto-merge-required-status.sh
+        run: bash scripts/check-auto-merge-required-status.test.sh
