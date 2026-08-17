@@ -51,7 +51,20 @@ fi
 
 offenders=() # "owner/repo|source|context"
 gaps=()      # "owner/repo: what couldn't be verified"
-scanned=0
+
+# Shared by both context-matching call sites below (rulesets and classic
+# branch protection): skip blanks, match case-insensitively, record an
+# offender. $offenders is the caller's array, mutated directly — bash
+# functions share it by default when not run in a subshell.
+record_offenders() { # repo source_label ctxs
+	local repo="$1" source_label="$2" ctxs="$3" ctx
+	while IFS= read -r ctx; do
+		[ -z "$ctx" ] && continue
+		if printf '%s' "$ctx" | grep -Eiq "$CONTEXT_PATTERN"; then
+			offenders+=("${repo}|${source_label}|${ctx}")
+		fi
+	done <<<"$ctxs"
+}
 
 # ---- 1. Enumerate consumers ------------------------------------------------
 # Code search, not an org-wide walk of every repo's .github/workflows/*.yml.
@@ -90,20 +103,21 @@ fi
 echo "Enumerated ${#repos[@]} candidate consumer repo(s) via code search (see RWF-003 for method + blind spots)."
 
 for repo in "${repos[@]}"; do
-	scanned=$((scanned + 1))
-	err="$(mktemp)"
+	meta_err="$(mktemp)"
 
 	# Pulled together: default_branch (for the classic-protection URL below)
 	# and permissions.admin (the caller's own access level on this repo, per
 	# GitHub's authenticated repo-read response) — the latter is needed to
 	# tell a genuine "not protected" 404 apart from a permission-denied 404
 	# on the classic-protection endpoint below.
-	if ! repo_meta="$(gh api "repos/${repo}" --jq '[.default_branch, ((.permissions.admin // false) | tostring)] | @tsv' 2>"$err")"; then
-		gaps+=("${repo}: could not resolve default branch — $(tr '\n' ' ' <"$err")")
-		rm -f "$err"
+	if ! repo_meta="$(gh api "repos/${repo}" --jq '[.default_branch, ((.permissions.admin // false) | tostring)] | @tsv' 2>"$meta_err")"; then
+		gaps+=("${repo}: could not resolve default branch — $(tr '\n' ' ' <"$meta_err")")
+		rm -f "$meta_err"
 		continue
 	fi
+	rm -f "$meta_err"
 	IFS=$'\t' read -r default_branch has_admin <<<"$repo_meta"
+	err="$(mktemp)"
 
 	# -- Repository rulesets (target: branch, enforcement: active only).
 	# `evaluate` is GitHub's own dry-run mode for staging a rule before
@@ -119,12 +133,7 @@ for repo in "${repos[@]}"; do
 			if ctxs="$(gh api "repos/${repo}/rulesets/${id}" --jq \
 				'.rules[]? | select(.type=="required_status_checks") | .parameters.required_status_checks[]?.context' \
 				2>"$rerr")"; then
-				while IFS= read -r ctx; do
-					[ -z "$ctx" ] && continue
-					if printf '%s' "$ctx" | grep -Eiq "$CONTEXT_PATTERN"; then
-						offenders+=("${repo}|ruleset ${id}|${ctx}")
-					fi
-				done <<<"$ctxs"
+				record_offenders "$repo" "ruleset ${id}" "$ctxs"
 			else
 				gaps+=("${repo}: could not read ruleset ${id} — $(tr '\n' ' ' <"$rerr")")
 			fi
@@ -153,12 +162,7 @@ for repo in "${repos[@]}"; do
 		cerr="$(mktemp)"
 		if classic_json="$(gh api "repos/${repo}/branches/${default_branch}/protection/required_status_checks" 2>"$cerr")"; then
 			ctxs="$(printf '%s' "$classic_json" | jq -r '.contexts[]?' 2>/dev/null || true)"
-			while IFS= read -r ctx; do
-				[ -z "$ctx" ] && continue
-				if printf '%s' "$ctx" | grep -Eiq "$CONTEXT_PATTERN"; then
-					offenders+=("${repo}|classic branch protection|${ctx}")
-				fi
-			done <<<"$ctxs"
+			record_offenders "$repo" "classic branch protection" "$ctxs"
 		elif ! grep -q "HTTP 404" "$cerr"; then
 			gaps+=("${repo}: could not read classic branch protection — $(tr '\n' ' ' <"$cerr")")
 		fi
@@ -167,7 +171,7 @@ for repo in "${repos[@]}"; do
 	rm -f "$err"
 done
 
-echo "Scanned ${scanned} repo(s)."
+echo "Scanned ${#repos[@]} repo(s)."
 
 status=0
 
@@ -189,7 +193,7 @@ if [ "${#offenders[@]}" -gt 0 ]; then
 fi
 
 if [ "$status" -eq 0 ]; then
-	echo "Clean: 0 of ${scanned} consumer(s) require an auto-merge status check."
+	echo "Clean: 0 of ${#repos[@]} consumer(s) require an auto-merge status check."
 fi
 
 exit "$status"

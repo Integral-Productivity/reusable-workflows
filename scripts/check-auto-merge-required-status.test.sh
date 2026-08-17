@@ -121,6 +121,11 @@ teardown_fake_gh() {
 	rm -rf "$FAKE_BIN_DIR"
 }
 
+# Pulls the "EXIT:<n>" sentinel a run_fixture output ends with off its own line.
+exit_code_of() {
+	printf '%s\n' "$1" | grep -o 'EXIT:[0-9]*' | tail -1 | cut -d: -f2
+}
+
 # run_fixture NAME PROTECTION_MODE
 # Runs the script under test with PATH shadowed by the fake gh, fixed to a
 # single repo with admin access (so the classic-protection call under test
@@ -149,7 +154,7 @@ run_fixture() {
 
 # ---- Fixture 1: 404 (not protected) — must be clean, exit 0 ---------------
 out="$(run_fixture 404)"
-exit_code="$(printf '%s\n' "$out" | grep -o 'EXIT:[0-9]*' | tail -1 | cut -d: -f2)"
+exit_code="$(exit_code_of "$out")"
 if [ "$exit_code" = "0" ]; then
 	pass "fixture 404: script exits 0"
 else
@@ -165,7 +170,7 @@ fi
 
 # ---- Fixture 2: non-404 failure (e.g. 403) — must be a gap, exit 1 --------
 out="$(run_fixture 403)"
-exit_code="$(printf '%s\n' "$out" | grep -o 'EXIT:[0-9]*' | tail -1 | cut -d: -f2)"
+exit_code="$(exit_code_of "$out")"
 if [ "$exit_code" = "1" ]; then
 	pass "fixture 403: script exits 1"
 else
@@ -181,7 +186,7 @@ fi
 
 # ---- Fixture 3: matched context — must be an offender, exit 1 -------------
 out="$(run_fixture offender)"
-exit_code="$(printf '%s\n' "$out" | grep -o 'EXIT:[0-9]*' | tail -1 | cut -d: -f2)"
+exit_code="$(exit_code_of "$out")"
 if [ "$exit_code" = "1" ]; then
 	pass "fixture offender: script exits 1"
 else
