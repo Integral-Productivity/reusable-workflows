@@ -101,7 +101,7 @@ Consequences and add a row to the table above.
 | [`validate-plugin-manifest.yml`](.github/workflows/validate-plugin-manifest.yml) | Run `claude plugin validate <manifest>` as a PR gate (auth-free, no secrets). |
 | [`reusable-dependency-review.yml`](.github/workflows/reusable-dependency-review.yml) | Fail a PR if a dependency change adds a `moderate`+ vulnerability (auth-free, no secrets). |
 | [`reusable-claude.yml`](.github/workflows/reusable-claude.yml) | The `@claude` on-demand bot. Needs the org secret `CLAUDE_CODE_OAUTH_TOKEN` (visibility:all). |
-| [`reusable-auto-merge.yml`](.github/workflows/reusable-auto-merge.yml) | Queue `claude/*` + Dependabot (patch/minor) PRs for auto-merge. Needs the **scoped** org secret `OP_AUTOMERGE_PUBLIC_TOKEN` (read-only on the `ip-automerge` PEM only). |
+| [`reusable-auto-merge.yml`](.github/workflows/reusable-auto-merge.yml) | Queue `claude/*` + `release-please--*` + Dependabot (patch/minor) PRs for auto-merge. Needs the **scoped** org secret `OP_AUTOMERGE_PUBLIC_TOKEN` (read-only on the `ip-automerge` PEM only). |
 
 ### `validate-plugin-manifest.yml`
 
@@ -187,10 +187,17 @@ a public repo does not trigger a run.
 
 ### `reusable-auto-merge.yml`
 
-Queues `claude/*` and Dependabot (patch/minor) PRs for auto-merge, minting a
-GitHub App token (not `GITHUB_TOKEN`) so the merge re-triggers downstream CI.
-The PEM read uses the public [`read-pem-from-1p`](.github/actions/read-pem-from-1p/action.yml)
-composite action in this repo (referenced by full public path).
+Queues `claude/*`, `release-please--*`, and Dependabot (patch/minor) PRs for
+auto-merge, minting a GitHub App token (not `GITHUB_TOKEN`) so the merge
+re-triggers downstream CI. The `release-please--*` path (issue #12) matches on
+branch-name prefix only — release-please derives the branch name from its
+`branch` + `package-name` config, so it differs per repo — and applies to
+every consumer of this reusable with no opt-in input; a release PR that goes
+green auto-merges and publishes to the marketplace with no human beat by
+design. Use the `hold-for-review` label (same escape hatch as `claude/*`) to
+opt a specific release PR out. The PEM read uses the public
+[`read-pem-from-1p`](.github/actions/read-pem-from-1p/action.yml) composite
+action in this repo (referenced by full public path).
 
 ```yaml
 name: Auto-Merge
