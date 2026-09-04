@@ -1,0 +1,237 @@
+# Reusable release-please workflow — PUBLIC HOST copy.
+#
+# Opens / updates a "Release PR" on every push to `main` in any consumer repo.
+# When the Release PR is merged, release-please creates the matching `vX.Y.Z`
+# git tag and GitHub Release — which is what fires `reusable-promote-stable.yml`
+# to advance the `stable` branch the internal marketplace tracks.
+#
+# Why this file lives here and not only in devops-excellence
+# ----------------------------------------------------------
+# GitHub does not allow a PUBLIC or an INTERNAL repo to call a reusable
+# workflow — or a composite action — stored in a PRIVATE repo. The call dies at
+# startup with `startup_failure`, zero jobs and no logs. `access_level:
+# organization` on the private host does not lift this: it admits PRIVATE
+# same-org callers only.
+#
+# Proven by run conclusions, not by reading settings (issue #44):
+#
+#   private caller  -> private devops-excellence  = success, jobs run
+#   INTERNAL caller -> private devops-excellence  = startup_failure, 0 jobs
+#   INTERNAL caller -> public  reusable-workflows = success, jobs run
+#
+# The other four reusables here were ported for exactly this reason under
+# devops-excellence ADR-065 (uniform public host for tier-3 repos) and ADR-038
+# (the public-host pattern). `reusable-release-please.yml` was authored on the
+# private host afterwards and never followed, which forced
+# `human-agent-collaboration-claude-plugin` (internal) to inline ~100 lines of
+# this body by hand. This port is the fix; see issue #44.
+#
+# Ported from Integral-Productivity/devops-excellence
+# `.github/workflows/reusable-release-please.yml@v1` (`18de53b`). Nothing
+# detects the two copies drifting — see RWF-004's consequences.
+#
+# Why this is App-mediated (and not just a plain release-please step)
+# -------------------------------------------------------------------
+# Integral-Productivity's enterprise policy sets
+# `can_approve_pull_request_reviews: false`, which blocks the default
+# GITHUB_TOKEN from creating PRs. `release-please` requires that capability to
+# open Release PRs; without it every push to `main` fails with "GitHub Actions
+# is not permitted to create or approve pull requests" (first hit by
+# holacracy-claude-plugin#19). A GitHub App installation token bypasses the
+# enterprise GITHUB_TOKEN-targeted policy. That App is `ip-releaser`, declared
+# in Integral-Productivity/ip-bots#50 and provisioned in #51.
+#
+# There is deliberately no GITHUB_TOKEN fallback. Falling back would restore the
+# exact failure this workflow exists to route around, and would do it silently.
+# When no App token can be minted, the release-please step does not run at all.
+#
+# Credential surface — DIVERGES from its two App-mediated siblings here
+# ---------------------------------------------------------------------
+# This workflow forwards `secrets.OP_SERVICE_ACCOUNT_TOKEN`, which is read-only
+# on the WHOLE `ip-automation` vault. `reusable-auto-merge.yml` and
+# `reusable-promote-stable.yml` both refuse that token on this public host and
+# take a per-capability SCOPED one instead (`OP_AUTOMERGE_PUBLIC_TOKEN`,
+# `OP_RELEASER_PUBLIC_TOKEN`) per devops-excellence ADR-045 / ADR-064.
+#
+# The divergence is deliberate and time-boxed: issue #44 requires this port to
+# keep the devops-excellence original's input/secret surface unchanged so that
+# existing private callers migrate with a one-line `uses:` edit and nothing
+# else. Adopting the scoped token is a caller-visible break, so it is a separate
+# decision rather than something smuggled into a port. See RWF-004.
+#
+# CONSEQUENCE A PUBLIC CALLER MUST READ: a leak of OP_SERVICE_ACCOUNT_TOKEN
+# reads every App PEM in `ip-automation`, including the org-admin
+# `ip-org-writer`. Until RWF-004 is superseded, do not wire a PUBLIC consumer
+# repo to this reusable. `reusable-promote-stable.yml` already reads the
+# ip-releaser PEM from the dedicated `ip-automation-public` vault via
+# `OP_RELEASER_PUBLIC_TOKEN`; that is the path a public caller needs here too.
+#
+#   vars.IP_RELEASER_APP_ID          — numeric, public identifier
+#                                      (declared in ip-bots#51's lifecycle)
+#   vars.IP_RELEASER_APP_CLIENT_ID   — alphanumeric Iv23li..., consumed by
+#                                      actions/create-github-app-token@v3
+#                                      via its `client-id` input
+#   secrets.OP_SERVICE_ACCOUNT_TOKEN — 1P service account token, read-only on
+#                                      the ip-automation vault.
+#                                      Caller-forwarded.
+#
+# Per ADR-003 in Integral-Productivity/ip-bots, 1Password Business is the sole
+# system-of-record for App PEMs. Per ADR-005 (and devops-excellence ADR-028),
+# App identifiers are org variables.
+#
+# The PEM read is centralized in the parameterized `read-pem-from-1p` composite
+# action — the PUBLIC copy in THIS repo, not the devops-excellence one, because
+# the private-host restriction above applies to composite actions identically
+# (public->public is what the devops-excellence public-private-reusable fitness
+# check permits). The token-minting action is SHA-pinned per ADR-045.
+#
+# Consumer-side example:
+#
+#   name: release-please
+#   on:
+#     push:
+#       branches: [main]
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#   jobs:
+#     release-please:
+#       uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-release-please.yml@v1
+#       secrets:
+#         OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+#
+# Unlike `reusable-promote-stable.yml`, the caller DOES need that `permissions:`
+# block: this workflow requests `contents: write` + `pull-requests: write`, and
+# a called reusable cannot request more than its caller grants. Both this org
+# and its repos default `default_workflow_permissions` to `read`, so a caller
+# that omits the block ends in an opaque `startup_failure` with 0 jobs.
+#
+# Reproducibility-critical callers may pin an exact release, e.g. `@v1.2.0`;
+# see RWF-002 and devops-excellence ADR-046 for the versioning policy.
+#
+# Per-repo config files (in the consumer repo):
+#   - release-please-config.json     (per-package release behavior)
+#   - .release-please-manifest.json  (current released version baseline)
+#   - version.txt                    (only when release-type: simple)
+#
+# Soft-failure contract ("NEVER blocks the consumer")
+# ---------------------------------------------------
+# This workflow never fails the consumer's main-branch CI. If credentials are
+# absent (precheck), the PEM read fails (1P outage / expired token), or
+# token-mint fails, an annotation is emitted and the job exits 0. The
+# release-please-action step itself runs only when a real installation token is
+# in hand. Token-generation failures emit `::error::` (visible in the Checks UI)
+# so silent secret corruption can't go undetected; soft remediation paths emit
+# `::warning::`.
+#
+# Note this is the OPPOSITE contract to `reusable-auto-merge.yml`, which was
+# changed by issues #17 / #23 to go RED whenever it was supposed to arm and did
+# not. The two differ on purpose: auto-merge failing silently loses a merge that
+# a human can still perform, whereas release-please failing loudly on every push
+# to `main` would block unrelated work in every consumer for a credential
+# problem none of them can fix. Do not "harmonize" this without reading #17.
+#
+# The secret is declared `required: false` on purpose, and this is the ONE
+# behavioral fix applied to the ported body. GitHub's `workflow_call` validator
+# rejects an empty `required: true` secret at startup, producing the opaque
+# 0-second `startup_failure` that `reusable-claude.yml` hit when its caller
+# landed before the secret existed — which would break the never-blocks contract
+# above at the only moment it matters. `required: false` is not a surface change
+# for any caller that forwards the secret; it only converts an unexplained abort
+# into a legible annotation for one that does not.
+
+name: Reusable release-please
+
+on:
+  workflow_call:
+    inputs:
+      config-file:
+        description: 'Path to release-please-config.json in the consumer repo.'
+        type: string
+        required: false
+        default: release-please-config.json
+      manifest-file:
+        description: 'Path to .release-please-manifest.json in the consumer repo.'
+        type: string
+        required: false
+        default: .release-please-manifest.json
+    secrets:
+      OP_SERVICE_ACCOUNT_TOKEN:
+        description: '1Password service account token, read-only on the ip-automation vault. The reusable reads the ip-releaser App PEM from op://ip-automation/ip-releaser/private_key via the public read-pem-from-1p composite action in this repo (devops-excellence ADR-033). Per ADR-003 in Integral-Productivity/ip-bots, 1P is the sole SoR for the App PEM. Declared required:false so a missing/empty secret degrades to a legible annotation instead of an opaque 0-second startup_failure — see RWF-004 and the header note above.'
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify org variable identifiers are configured
+        id: app_id_check
+        # APP_ID + CLIENT_ID are org variables (ip-bots ADR-005 /
+        # devops-excellence ADR-028). This precheck warns rather than fails when
+        # either is missing, so a repo where the ip-releaser App simply is not
+        # provisioned keeps its main-branch CI green — a legitimate opt-out
+        # state, not a malfunction.
+        env:
+          APP_ID: ${{ vars.IP_RELEASER_APP_ID }}
+          CLIENT_ID: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+        run: |
+          missing=0
+          if [ -z "${APP_ID:-}" ]; then
+            echo "::warning::vars.IP_RELEASER_APP_ID is not set on this repo or the org. Fix: gh variable set IP_RELEASER_APP_ID --org Integral-Productivity --visibility all --body '<numeric-app-id>'"
+            missing=1
+          fi
+          if [ -z "${CLIENT_ID:-}" ]; then
+            echo "::warning::vars.IP_RELEASER_APP_CLIENT_ID is not set on this repo or the org. Fix: gh variable set IP_RELEASER_APP_CLIENT_ID --org Integral-Productivity --visibility all --body '<Iv23li...>'"
+            missing=1
+          fi
+          if [ "$missing" = "1" ]; then
+            echo "::warning::Skipping release-please — required org variable identifiers are missing. See warnings above."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read ip-releaser App PEM from 1Password
+        id: pem
+        if: steps.app_id_check.outputs.ready == 'true'
+        continue-on-error: true
+        # `continue-on-error: true` preserves the soft-failure contract;
+        # downstream token-mint is gated on this step's outcome. Public->public
+        # composite-action reference — the private devops-excellence original is
+        # unreachable from a public or internal caller (see header).
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        with:
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          item-path: op://ip-automation/ip-releaser/private_key
+
+      - name: Generate App token
+        id: app-token
+        if: |
+          steps.app_id_check.outputs.ready == 'true'
+          && steps.pem.outcome == 'success'
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+
+      - name: Error if token generation failed
+        if: steps.app-token.outcome == 'failure'
+        # Use a literal block scalar (`|`) rather than a flow scalar so any
+        # `#NN` reference in the message isn't truncated by YAML's comment
+        # parser — see reusable-auto-merge.yml's identical guard.
+        run: |
+          echo "::error::App token generation failed — PEM was successfully read from 1P at op://ip-automation/ip-releaser/private_key, but actions/create-github-app-token@v3 still failed. Check that vars.IP_RELEASER_APP_CLIENT_ID is set at the org level and that the ip-releaser App is installed on this repo."
+
+      - name: Run release-please
+        if: steps.app-token.outcome == 'success'
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: ${{ inputs.config-file }}
+          manifest-file: ${{ inputs.manifest-file }}
