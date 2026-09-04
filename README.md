@@ -1,20 +1,44 @@
 # reusable-workflows
 
 Public reusable GitHub Actions workflows for the **Integral-Productivity** org,
-consumable by **public** repos (e.g. the `*-claude-plugin` repos and the plugin
-`marketplace`).
+consumable by **public** and **internal** repos (e.g. the `*-claude-plugin` repos
+and the plugin `marketplace`).
+
+**Host-choice rule: if any public *or* internal repo will call the reusable, it
+belongs here.** Only private callers can reach a private host.
 
 ## Why this repo exists
 
-GitHub does **not** allow a public repository to call a reusable workflow stored
-in a **private** or **internal** repository — the call fails at startup with a
-"workflow file issue" and no jobs run. Our org's private
-[`devops-excellence`](https://github.com/Integral-Productivity/devops-excellence)
-repo hosts the reusable workflows that **private** repos consume, but public
-repos cannot reach them. This repo is the **public** counterpart: the canonical
-home for reusable workflows that public repos need.
+Reachability is decided by the **caller's** visibility, not only by whether the
+caller is public:
 
-See devops-excellence **ADR-038** for the decision and context.
+| Caller visibility | Private host (`devops-excellence`) | Public host (this repo) |
+|---|---|---|
+| private | reachable | reachable |
+| **internal** | **not reachable** | reachable |
+| **public** | **not reachable** | reachable |
+
+So a **private** host is reachable only by **private** same-org callers;
+**public and internal** callers both need a public host. An unreachable call
+fails at startup with a "workflow file issue" — `startup_failure`, zero jobs, no
+logs — so there is nothing to read but the `uses:` line.
+
+`access_level: organization` on the private host does **not** change this. It is
+the specific setting that misleads: it admits **private** same-org callers and
+does **not** admit internal ones. `devops-excellence` has it set, and an internal
+caller pointed at it still fails at startup.
+
+Our org's private
+[`devops-excellence`](https://github.com/Integral-Productivity/devops-excellence)
+repo hosts the reusable workflows that **private** repos consume. This repo is
+the **public** counterpart: the canonical home for reusable workflows that
+public and internal repos need.
+
+See devops-excellence **ADR-038** for the decision and context, and
+[`docs/solutions/workflow-issues/tier3-automerge-silent-green-and-internal-private-reusable.md`](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/solutions/workflow-issues/tier3-automerge-silent-green-and-internal-private-reusable.md)
+for the full diagnosis — the live-run evidence and the causes ruled out.
+(`devops-excellence` is private, so that link is internal-only and 404s for
+anonymous readers.)
 
 ## Versioning
 
