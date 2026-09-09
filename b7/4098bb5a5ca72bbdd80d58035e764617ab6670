@@ -1,0 +1,35 @@
+.github/workflows/reusable-architecture-fitness.yml
+  s_71438658e999f1::t_1e022afd1ef13b 1-235
+.github/workflows/reusable-bdd.yml
+  s_71438658e999f1::t_1e022afd1ef13b 1-219
+.github/workflows/reusable-ci-node.yml
+  s_71438658e999f1::t_4dcbc1e99164f1 57-59,61-80
+  s_71438658e999f1::t_d9bebe8eff7072 255,394,532
+  s_71438658e999f1::t_1e022afd1ef13b 1-56,60,84-254,256-393,395-531,533-548
+  s_71438658e999f1::t_e0d87c130311d1 81-83
+.github/workflows/reusable-claude-code-review.yml
+  s_71438658e999f1::t_1e022afd1ef13b 1-305
+.github/workflows/codeql.yml
+  s_71438658e999f1::t_678e9c304c3b48 1-52
+docs/adr/RWF-005-declare-every-divergence-from-the-private-twin-in-the-file-header.md
+  s_71438658e999f1::t_e8688254a7f96c 111
+  s_71438658e999f1::t_21b8d083b6cd73 1-110,112-117
+.github/workflows/reusable-codeql.yml
+  s_71438658e999f1::t_1e022afd1ef13b 1-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "b74098bb5a5ca72bbdd80d58035e764617ab6670",
+  "prompts": {},
+  "sessions": {
+    "s_71438658e999f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4693d4db-cbab-4b66-9851-941564220e89",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Kraig Parkinson <kraig.parkinson@gmail.com>"
+    }
+  }
+}
