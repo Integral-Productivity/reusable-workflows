@@ -1,0 +1,19 @@
+.github/workflows/codeql.yml
+  s_71438658e999f1::t_518f3b3fc33b4c 1,10-43,48,52-53,55-56,60,69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "9e05f57a5bbc66b7139f21bd44e7b4ee1f4f3cb6",
+  "prompts": {},
+  "sessions": {
+    "s_71438658e999f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4693d4db-cbab-4b66-9851-941564220e89",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Kraig Parkinson <kraig.parkinson@gmail.com>"
+    }
+  }
+}
