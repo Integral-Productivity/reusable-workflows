@@ -1,0 +1,548 @@
+# Reusable CI for Node projects (pnpm or npm) — PUBLIC HOST copy.
+#
+# This is the public-repo-consumable copy of a reusable that also lives in the
+# PRIVATE `devops-excellence` repo. GitHub does not let a PUBLIC or INTERNAL
+# repo resolve a reusable workflow — or a composite action — hosted in a
+# PRIVATE repo. The call dies at compile time with a run-level
+# `startup_failure`: zero jobs, no logs, no annotations, and only "this run
+# likely failed because of a workflow file issue" in the UI. Setting
+# `access_level: organization` on the private host does NOT lift this; it
+# admits private same-org callers only. Public and internal repos must
+# therefore reference THIS host.
+#
+# Lineage: devops-excellence ADR-038 / ADR-049 (this public host), ADR-065
+# (the uniform public-host model for public and internal alike), ADR-084
+# (visibility is the host axis; staged convergence on one public host) and
+# ADR-088 (the private-host reusable set is closed).
+#
+# Ported by devops-excellence#611 — ADR-084 Stage B. See RWF-005 in this repo
+# for the header-only-delta convention every file in this port follows.
+#
+# What it does
+# ------------
+# The standard typecheck / build / test trio every Tier 1 and Tier 2 Node repo
+# in the org is expected to run.
+#
+# Package managers:
+#   - pnpm (default): for workspaces and repos that already use pnpm.
+#   - npm: for repos that install from GitHub Packages with NODE_AUTH_TOKEN
+#     (the MCP server pattern). Callers must pass `secrets.NODE_AUTH_TOKEN`.
+# See devops-excellence ADR-016 for the package-manager extension rationale.
+#
+# Credential surface — IDENTICAL to the private copy
+# --------------------------------------------------
+# One optional secret, and it is the same one the private copy declares:
+#
+#   NODE_AUTH_TOKEN (required: false) — a GitHub Packages registry token. Only
+#     callers whose @integral-productivity/* dependencies resolve from
+#     npm.pkg.github.com need it; pnpm workspace: / link: consumers do not, and
+#     the in-workflow guard detects which case applies before failing.
+#
+# This copy reads NO 1Password PEM and mints NO GitHub App token, so the
+# ADR-065 whole-vault hazard does not apply to it. Contrast
+# `reusable-auto-merge.yml` in this same directory, whose header carries a
+# "Credential surface (differs from the private copy)" section because it DOES
+# mint App tokens and therefore had to swap whole-vault
+# `OP_SERVICE_ACCOUNT_TOKEN` for the scoped `OP_*_PUBLIC_TOKEN` form (ADR-045 /
+# ADR-078). Nothing of that kind is needed here.
+#
+# NEVER forward `OP_SERVICE_ACCOUNT_TOKEN` to this workflow. It is read-only
+# across the WHOLE `ip-automation` vault, so a leak on a public runner reads
+# every App PEM there including the org-admin `ip-org-writer`. It is also not
+# declared below, and passing a secret a reusable does not declare fails the
+# run at startup (ADR-045, ADR-065).
+#
+# Declared delta from the private copy
+# ------------------------------------
+# TWO deltas. This header, plus one three-line body fix. Everything else from
+# `name:` down is byte-identical to
+# `devops-excellence/.github/workflows/reusable-ci-node.yml`. Both are the
+# declared-delta surface the drift check in devops-excellence#612 reads.
+#
+# The body delta: the three npm-branch `::error::` messages (the
+# "Verify GitHub Packages auth token is present (npm)" steps) wrote their
+# example fallback as `\${{ secrets.NODE_AUTH_TOKEN ||
+# secrets.DEPENDABOT_PACKAGES_TOKEN }}`. The backslash escapes the `$` for
+# BASH, but GitHub expands `${{ }}` inside a `run:` block BEFORE bash ever
+# sees the text — so that is a LIVE expression, not the literal it was meant
+# to be. `NODE_AUTH_TOKEN` is declared and `DEPENDABOT_PACKAGES_TOKEN` is not,
+# so `a || b` evaluates to the real registry token and splices it into the
+# annotation. GitHub's log masking renders it `***`, which is exactly why the
+# defect survived unnoticed on the private host.
+#
+# This copy uses the `${{ '${{' }} ... ${{ '}}' }}` form the three PNPM
+# branches in the same file already used, which makes the expression engine
+# itself emit the literal. It is the same technique, and the same reasoning,
+# that `reusable-claude-code-review.yml` states in its own precheck step:
+# never put a live secrets expression in `::error::` text.
+#
+# Ported unfixed, this file does not pass this repo's CI: `actionlint` rejects
+# `secrets.DEPENDABOT_PACKAGES_TOKEN` as undefined on the `secrets` object.
+# The private copy still carries the defect; carrying the fix back is tracked
+# in devops-excellence#661. See RWF-005 for why the fix lands here rather than
+# upstream in the same change.
+#
+# Callers
+# -------
+#   uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-ci-node.yml@v1
+#
+# Reproducibility-critical callers may pin an exact release, e.g. `@v1.2.0`.
+# See RWF-002 for this repo's moving-`@v1` policy (devops-excellence ADR-046
+# is the org-level record).
+
+name: Reusable CI (Node)
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js major version to install.'
+        required: false
+        type: string
+        default: '22'
+      package-manager:
+        description: 'Package manager: pnpm (default) or npm. npm callers must pass NODE_AUTH_TOKEN if they install from GitHub Packages.'
+        required: false
+        type: string
+        default: 'pnpm'
+      working-directory:
+        description: 'Working directory for the install/build/test commands. Defaults to repo root.'
+        required: false
+        type: string
+        default: '.'
+      build:
+        description: 'Run the build job. Set to false for tsx-runtime repos that alias build to tsc --noEmit (duplicate work since typecheck already runs that).'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      NODE_AUTH_TOKEN:
+        description: 'Token for authenticating to GitHub Packages (npm registry). Required for npm callers that depend on @integral-productivity/* private packages.'
+        required: false
+
+# Permissions are deliberately NOT declared at the workflow level. A reusable
+# workflow cannot extend the caller's GITHUB_TOKEN permissions, so declaring
+# them here as "read-all" would cause startup_failure when the caller grants
+# something narrower (e.g., contents: read).
+#
+# Callers must grant at minimum: contents: read.
+
+concurrency:
+  group: reusable-ci-node-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6.0.9
+
+      - name: Set up Node.js ${{ inputs.node-version }} (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+          cache-dependency-path: ${{ inputs.working-directory }}/pnpm-lock.yaml
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@integral-productivity'
+
+      - name: Set up Node.js ${{ inputs.node-version }} (npm)
+        if: inputs.package-manager == 'npm'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@integral-productivity'
+
+      # An empty NODE_AUTH_TOKEN means 'pnpm install' will 401 on
+      # npm.pkg.github.com — but ONLY for projects that actually install from
+      # GitHub Packages. pnpm workspace consumers historically resolve every
+      # @integral-productivity/* dependency as workspace:* (link:, zero
+      # registry tarballs), so a workspace: version specifier must NOT count
+      # as a GitHub Packages dependency, or every workspace repo would be
+      # failed for a token it never needed.
+      #
+      # Detect whether GitHub Packages is in play before guarding:
+      #   1. pnpm-lock.yaml (in the working dir), when present, is
+      #      authoritative: 'pnpm install --frozen-lockfile' independently
+      #      rejects a lockfile that drifted from package.json, so trusting
+      #      it here never masks a real mismatch. Grep it for
+      #      npm.pkg.github.com.
+      #   2. Only when no lockfile exists at all, fall back to scanning
+      #      package.json dependencies/devDependencies/peerDependencies/
+      #      optionalDependencies for an @integral-productivity/ entry whose
+      #      version specifier is not one of pnpm's local-resolution
+      #      protocols (workspace:, link:, file:, portal:).
+      # If neither signals GitHub Packages, skip the guard entirely (a
+      # public-only or workspace-only caller forwarding no token is expected
+      # and must stay green).
+      - name: Verify GitHub Packages auth token is present (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: |
+          uses_github_packages=false
+          if [ -f pnpm-lock.yaml ]; then
+            if grep -q 'npm.pkg.github.com' pnpm-lock.yaml; then
+              uses_github_packages=true
+            fi
+          elif [ -f package.json ] && node -e 'const p=require("./package.json");const d={...(p.dependencies||{}),...(p.devDependencies||{}),...(p.peerDependencies||{}),...(p.optionalDependencies||{})};process.exit(Object.entries(d).some(([k,v])=>k.startsWith("@integral-productivity/")&&!/^(workspace|link|file|portal):/.test(String(v)))?0:1)'; then
+            uses_github_packages=true
+          fi
+
+          if [ "$uses_github_packages" != "true" ]; then
+            echo "No GitHub Packages dependencies detected; skipping NODE_AUTH_TOKEN guard."
+            exit 0
+          fi
+
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NODE_AUTH_TOKEN is empty — pnpm install will 401 on npm.pkg.github.com. If this is a Dependabot PR, add the registry token to the *Dependabot* secret store (Settings → Secrets and variables → Dependabot), which is separate from Actions secrets, or have the caller pass a fallback such as ${{ '${{' }} secrets.NODE_AUTH_TOKEN || secrets.DEPENDABOT_PACKAGES_TOKEN ${{ '}}' }}."
+            exit 1
+          fi
+
+      - name: Install dependencies (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: pnpm install --frozen-lockfile
+
+      # An empty NODE_AUTH_TOKEN means 'npm ci' will 401 on npm.pkg.github.com
+      # — but ONLY for projects that actually install from GitHub Packages.
+      # Public-only repos resolve every dependency from registry.npmjs.org and
+      # never need a token, so we must not fail them for an empty token.
+      #
+      # Detect whether GitHub Packages is in play before guarding:
+      #   1. package-lock.json (in the working dir) references npm.pkg.github.com, or
+      #   2. package.json dependencies/devDependencies reference @integral-productivity/.
+      # If neither, skip the guard entirely (a public-only caller forwarding no
+      # token is expected and must stay green).
+      #
+      # When GitHub Packages IS used, an empty token most commonly means a
+      # Dependabot-triggered run: Dependabot cannot read Actions secrets — only
+      # the separate Dependabot secret store — so a token that lives only in
+      # Actions resolves to empty. Fail loud here instead of as an opaque
+      # tsc/test failure later.
+      - name: Verify GitHub Packages auth token is present (npm)
+        if: inputs.package-manager == 'npm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: |
+          uses_github_packages=false
+          if [ -f package-lock.json ] && grep -q 'npm.pkg.github.com' package-lock.json; then
+            uses_github_packages=true
+          elif [ -f package.json ] && node -e 'const p=require("./package.json");const d={...(p.dependencies||{}),...(p.devDependencies||{})};process.exit(Object.keys(d).some(k=>k.startsWith("@integral-productivity/"))?0:1)'; then
+            uses_github_packages=true
+          fi
+
+          if [ "$uses_github_packages" != "true" ]; then
+            echo "No GitHub Packages dependencies detected; skipping NODE_AUTH_TOKEN guard."
+            exit 0
+          fi
+
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NODE_AUTH_TOKEN is empty — npm ci will 401 on npm.pkg.github.com. If this is a Dependabot PR, add the registry token to the *Dependabot* secret store (Settings → Secrets and variables → Dependabot), which is separate from Actions secrets, or have the caller pass a fallback such as ${{ '${{' }} secrets.NODE_AUTH_TOKEN || secrets.DEPENDABOT_PACKAGES_TOKEN ${{ '}}' }}."
+            exit 1
+          fi
+
+      - name: Install dependencies (npm)
+        if: inputs.package-manager == 'npm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: npm ci
+
+      - name: Typecheck (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm typecheck
+
+      - name: Typecheck (npm)
+        if: inputs.package-manager == 'npm'
+        run: npm run typecheck
+
+  build:
+    name: Build
+    if: inputs.build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6.0.9
+
+      - name: Set up Node.js ${{ inputs.node-version }} (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+          cache-dependency-path: ${{ inputs.working-directory }}/pnpm-lock.yaml
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@integral-productivity'
+
+      - name: Set up Node.js ${{ inputs.node-version }} (npm)
+        if: inputs.package-manager == 'npm'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@integral-productivity'
+
+      # An empty NODE_AUTH_TOKEN means 'pnpm install' will 401 on
+      # npm.pkg.github.com — but ONLY for projects that actually install from
+      # GitHub Packages. pnpm workspace consumers historically resolve every
+      # @integral-productivity/* dependency as workspace:* (link:, zero
+      # registry tarballs), so a workspace: version specifier must NOT count
+      # as a GitHub Packages dependency, or every workspace repo would be
+      # failed for a token it never needed.
+      #
+      # Detect whether GitHub Packages is in play before guarding:
+      #   1. pnpm-lock.yaml (in the working dir), when present, is
+      #      authoritative: 'pnpm install --frozen-lockfile' independently
+      #      rejects a lockfile that drifted from package.json, so trusting
+      #      it here never masks a real mismatch. Grep it for
+      #      npm.pkg.github.com.
+      #   2. Only when no lockfile exists at all, fall back to scanning
+      #      package.json dependencies/devDependencies/peerDependencies/
+      #      optionalDependencies for an @integral-productivity/ entry whose
+      #      version specifier is not one of pnpm's local-resolution
+      #      protocols (workspace:, link:, file:, portal:).
+      # If neither signals GitHub Packages, skip the guard entirely (a
+      # public-only or workspace-only caller forwarding no token is expected
+      # and must stay green).
+      - name: Verify GitHub Packages auth token is present (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: |
+          uses_github_packages=false
+          if [ -f pnpm-lock.yaml ]; then
+            if grep -q 'npm.pkg.github.com' pnpm-lock.yaml; then
+              uses_github_packages=true
+            fi
+          elif [ -f package.json ] && node -e 'const p=require("./package.json");const d={...(p.dependencies||{}),...(p.devDependencies||{}),...(p.peerDependencies||{}),...(p.optionalDependencies||{})};process.exit(Object.entries(d).some(([k,v])=>k.startsWith("@integral-productivity/")&&!/^(workspace|link|file|portal):/.test(String(v)))?0:1)'; then
+            uses_github_packages=true
+          fi
+
+          if [ "$uses_github_packages" != "true" ]; then
+            echo "No GitHub Packages dependencies detected; skipping NODE_AUTH_TOKEN guard."
+            exit 0
+          fi
+
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NODE_AUTH_TOKEN is empty — pnpm install will 401 on npm.pkg.github.com. If this is a Dependabot PR, add the registry token to the *Dependabot* secret store (Settings → Secrets and variables → Dependabot), which is separate from Actions secrets, or have the caller pass a fallback such as ${{ '${{' }} secrets.NODE_AUTH_TOKEN || secrets.DEPENDABOT_PACKAGES_TOKEN ${{ '}}' }}."
+            exit 1
+          fi
+
+      - name: Install dependencies (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: pnpm install --frozen-lockfile
+
+      # An empty NODE_AUTH_TOKEN means 'npm ci' will 401 on npm.pkg.github.com
+      # — but ONLY for projects that actually install from GitHub Packages.
+      # Public-only repos resolve every dependency from registry.npmjs.org and
+      # never need a token, so we must not fail them for an empty token.
+      #
+      # Detect whether GitHub Packages is in play before guarding:
+      #   1. package-lock.json (in the working dir) references npm.pkg.github.com, or
+      #   2. package.json dependencies/devDependencies reference @integral-productivity/.
+      # If neither, skip the guard entirely (a public-only caller forwarding no
+      # token is expected and must stay green).
+      #
+      # When GitHub Packages IS used, an empty token most commonly means a
+      # Dependabot-triggered run: Dependabot cannot read Actions secrets — only
+      # the separate Dependabot secret store — so a token that lives only in
+      # Actions resolves to empty. Fail loud here instead of as an opaque
+      # tsc/test failure later.
+      - name: Verify GitHub Packages auth token is present (npm)
+        if: inputs.package-manager == 'npm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: |
+          uses_github_packages=false
+          if [ -f package-lock.json ] && grep -q 'npm.pkg.github.com' package-lock.json; then
+            uses_github_packages=true
+          elif [ -f package.json ] && node -e 'const p=require("./package.json");const d={...(p.dependencies||{}),...(p.devDependencies||{})};process.exit(Object.keys(d).some(k=>k.startsWith("@integral-productivity/"))?0:1)'; then
+            uses_github_packages=true
+          fi
+
+          if [ "$uses_github_packages" != "true" ]; then
+            echo "No GitHub Packages dependencies detected; skipping NODE_AUTH_TOKEN guard."
+            exit 0
+          fi
+
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NODE_AUTH_TOKEN is empty — npm ci will 401 on npm.pkg.github.com. If this is a Dependabot PR, add the registry token to the *Dependabot* secret store (Settings → Secrets and variables → Dependabot), which is separate from Actions secrets, or have the caller pass a fallback such as ${{ '${{' }} secrets.NODE_AUTH_TOKEN || secrets.DEPENDABOT_PACKAGES_TOKEN ${{ '}}' }}."
+            exit 1
+          fi
+
+      - name: Install dependencies (npm)
+        if: inputs.package-manager == 'npm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: npm ci
+
+      - name: Build (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm build
+
+      - name: Build (npm)
+        if: inputs.package-manager == 'npm'
+        run: npm run build
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6.0.9
+
+      - name: Set up Node.js ${{ inputs.node-version }} (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+          cache-dependency-path: ${{ inputs.working-directory }}/pnpm-lock.yaml
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@integral-productivity'
+
+      - name: Set up Node.js ${{ inputs.node-version }} (npm)
+        if: inputs.package-manager == 'npm'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@integral-productivity'
+
+      # An empty NODE_AUTH_TOKEN means 'pnpm install' will 401 on
+      # npm.pkg.github.com — but ONLY for projects that actually install from
+      # GitHub Packages. pnpm workspace consumers historically resolve every
+      # @integral-productivity/* dependency as workspace:* (link:, zero
+      # registry tarballs), so a workspace: version specifier must NOT count
+      # as a GitHub Packages dependency, or every workspace repo would be
+      # failed for a token it never needed.
+      #
+      # Detect whether GitHub Packages is in play before guarding:
+      #   1. pnpm-lock.yaml (in the working dir), when present, is
+      #      authoritative: 'pnpm install --frozen-lockfile' independently
+      #      rejects a lockfile that drifted from package.json, so trusting
+      #      it here never masks a real mismatch. Grep it for
+      #      npm.pkg.github.com.
+      #   2. Only when no lockfile exists at all, fall back to scanning
+      #      package.json dependencies/devDependencies/peerDependencies/
+      #      optionalDependencies for an @integral-productivity/ entry whose
+      #      version specifier is not one of pnpm's local-resolution
+      #      protocols (workspace:, link:, file:, portal:).
+      # If neither signals GitHub Packages, skip the guard entirely (a
+      # public-only or workspace-only caller forwarding no token is expected
+      # and must stay green).
+      - name: Verify GitHub Packages auth token is present (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: |
+          uses_github_packages=false
+          if [ -f pnpm-lock.yaml ]; then
+            if grep -q 'npm.pkg.github.com' pnpm-lock.yaml; then
+              uses_github_packages=true
+            fi
+          elif [ -f package.json ] && node -e 'const p=require("./package.json");const d={...(p.dependencies||{}),...(p.devDependencies||{}),...(p.peerDependencies||{}),...(p.optionalDependencies||{})};process.exit(Object.entries(d).some(([k,v])=>k.startsWith("@integral-productivity/")&&!/^(workspace|link|file|portal):/.test(String(v)))?0:1)'; then
+            uses_github_packages=true
+          fi
+
+          if [ "$uses_github_packages" != "true" ]; then
+            echo "No GitHub Packages dependencies detected; skipping NODE_AUTH_TOKEN guard."
+            exit 0
+          fi
+
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NODE_AUTH_TOKEN is empty — pnpm install will 401 on npm.pkg.github.com. If this is a Dependabot PR, add the registry token to the *Dependabot* secret store (Settings → Secrets and variables → Dependabot), which is separate from Actions secrets, or have the caller pass a fallback such as ${{ '${{' }} secrets.NODE_AUTH_TOKEN || secrets.DEPENDABOT_PACKAGES_TOKEN ${{ '}}' }}."
+            exit 1
+          fi
+
+      - name: Install dependencies (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: pnpm install --frozen-lockfile
+
+      # An empty NODE_AUTH_TOKEN means 'npm ci' will 401 on npm.pkg.github.com
+      # — but ONLY for projects that actually install from GitHub Packages.
+      # Public-only repos resolve every dependency from registry.npmjs.org and
+      # never need a token, so we must not fail them for an empty token.
+      #
+      # Detect whether GitHub Packages is in play before guarding:
+      #   1. package-lock.json (in the working dir) references npm.pkg.github.com, or
+      #   2. package.json dependencies/devDependencies reference @integral-productivity/.
+      # If neither, skip the guard entirely (a public-only caller forwarding no
+      # token is expected and must stay green).
+      #
+      # When GitHub Packages IS used, an empty token most commonly means a
+      # Dependabot-triggered run: Dependabot cannot read Actions secrets — only
+      # the separate Dependabot secret store — so a token that lives only in
+      # Actions resolves to empty. Fail loud here instead of as an opaque
+      # tsc/test failure later.
+      - name: Verify GitHub Packages auth token is present (npm)
+        if: inputs.package-manager == 'npm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: |
+          uses_github_packages=false
+          if [ -f package-lock.json ] && grep -q 'npm.pkg.github.com' package-lock.json; then
+            uses_github_packages=true
+          elif [ -f package.json ] && node -e 'const p=require("./package.json");const d={...(p.dependencies||{}),...(p.devDependencies||{})};process.exit(Object.keys(d).some(k=>k.startsWith("@integral-productivity/"))?0:1)'; then
+            uses_github_packages=true
+          fi
+
+          if [ "$uses_github_packages" != "true" ]; then
+            echo "No GitHub Packages dependencies detected; skipping NODE_AUTH_TOKEN guard."
+            exit 0
+          fi
+
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NODE_AUTH_TOKEN is empty — npm ci will 401 on npm.pkg.github.com. If this is a Dependabot PR, add the registry token to the *Dependabot* secret store (Settings → Secrets and variables → Dependabot), which is separate from Actions secrets, or have the caller pass a fallback such as ${{ '${{' }} secrets.NODE_AUTH_TOKEN || secrets.DEPENDABOT_PACKAGES_TOKEN ${{ '}}' }}."
+            exit 1
+          fi
+
+      - name: Install dependencies (npm)
+        if: inputs.package-manager == 'npm'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: npm ci
+
+      - name: Test (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm test
+
+      - name: Test (npm)
+        if: inputs.package-manager == 'npm'
+        run: npm test

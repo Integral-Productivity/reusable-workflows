@@ -1,0 +1,305 @@
+# Reusable Claude Code Review — PUBLIC HOST copy.
+#
+# This is the public-repo-consumable copy of a reusable that also lives in the
+# PRIVATE `devops-excellence` repo. GitHub does not let a PUBLIC or INTERNAL
+# repo resolve a reusable workflow — or a composite action — hosted in a
+# PRIVATE repo. The call dies at compile time with a run-level
+# `startup_failure`: zero jobs, no logs, no annotations, and only "this run
+# likely failed because of a workflow file issue" in the UI. Setting
+# `access_level: organization` on the private host does NOT lift this; it
+# admits private same-org callers only. Public and internal repos must
+# therefore reference THIS host.
+#
+# Lineage: devops-excellence ADR-038 / ADR-049 (this public host), ADR-065
+# (the uniform public-host model for public and internal alike), ADR-084
+# (visibility is the host axis; staged convergence on one public host) and
+# ADR-088 (the private-host reusable set is closed).
+#
+# Ported by devops-excellence#611 — ADR-084 Stage B. See RWF-005 in this repo
+# for the header-only-delta convention every file in this port follows.
+#
+# Credential surface — IDENTICAL to the private copy
+# --------------------------------------------------
+# One optional secret, and it is the same one the private copy declares:
+#
+#   CLAUDE_CODE_OAUTH_TOKEN (required: false) — the OAuth token for
+#     anthropics/claude-code-action. Provisioned org-wide with
+#     `--visibility all`, so a public consumer repo already sees it;
+#     the caller still has to forward it under its own `secrets:` block.
+#
+# This copy reads NO 1Password PEM and mints NO GitHub App token, so the
+# ADR-065 whole-vault hazard does not apply to it. Contrast
+# `reusable-auto-merge.yml` in this same directory, whose header carries a
+# "Credential surface (differs from the private copy)" section because it
+# DOES mint App tokens and therefore had to swap whole-vault
+# `OP_SERVICE_ACCOUNT_TOKEN` for the scoped `OP_*_PUBLIC_TOKEN` form
+# (ADR-045 / ADR-078). Nothing of that kind is needed here.
+#
+# NEVER forward `OP_SERVICE_ACCOUNT_TOKEN` to this workflow. It is
+# read-only across the WHOLE `ip-automation` vault, so a leak on a public
+# runner reads every App PEM there including the org-admin
+# `ip-org-writer`. It is also not declared below, and passing a secret a
+# reusable does not declare fails the run at startup (ADR-045, ADR-065).
+#
+# One public-host consequence worth stating plainly: the fork-PR skip in
+# the contract below matters MORE here than on the private host. A public
+# repo can receive fork PRs at all, and GitHub passes those runs no
+# secrets. Those PRs get a grey SKIPPED `claude-review` check, never a
+# false green — which is the whole point of devops-excellence#371.
+#
+# Declared delta from the private copy
+# ------------------------------------
+# THIS HEADER ONLY. Everything from `name:` down is byte-identical to
+# `devops-excellence/.github/workflows/reusable-claude-code-review.yml`.
+# That is the declared-delta surface the drift check in
+# devops-excellence#612 reads. Note the body retains its
+# "VERBATIM COPY: claude-review token precheck kernel" fences: the test
+# that pins that kernel (`test-claude-review-precheck.yml`) and the
+# `verbatim-copy-in-sync` self-check that enforces it both live on the
+# PRIVATE host. Keeping the fences byte-identical here is what lets that
+# check keep working once #612 compares the two copies.
+#
+# ---------------------------------------------------------------------
+# Everything below is inherited verbatim from the private copy's header,
+# with the two caller `uses:` examples repointed at this public host.
+# ---------------------------------------------------------------------
+#
+#
+# Runs `anthropics/claude-code-action@v1` with the `code-review` plugin to
+# auto-review the diff on every PR. Centralizes the action version, prompt,
+# and plugin configuration in one place so every consumer repo gets the same
+# review behavior without copying ~40 lines of YAML.
+#
+# The token precheck below is dogfood-tested by `test-claude-review-precheck.yml`
+# (VERBATIM COPY fences; drift is caught by the `verbatim-copy-in-sync` self-check
+# and by that test's `paths:` trigger).
+#
+# Callers MUST provide their own `pull_request` trigger — reusable workflows
+# can't declare `paths:` filters that apply to the caller's events, so the
+# caller is responsible for any path or PR-type filtering. The canonical
+# caller is the dogfood file in this repo (`claude-code-review.yml`). For
+# consumer repos, the only change is the `uses:` path:
+#
+#   uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-claude-code-review.yml@v1
+#
+# Reproducibility-critical callers may pin an exact release, e.g. `@v1.2.0`;
+# see ADR-046 for the versioning policy.
+#
+# Optional caller-side `paths:` filter (PR only runs if these files change):
+#
+#   on:
+#     pull_request:
+#       paths:
+#         - "src/**/*.ts"
+#         - "src/**/*.tsx"
+#
+# Callers MUST also declare a top-level `permissions:` block mirroring the
+# block this file declares — a workflow_call reusable can only USE permissions
+# that the caller has GRANTED, and the repo default (`contents: read`) is not
+# enough. Without it, the validator rejects the call at startup with the
+# "is requesting X, is only allowed Y" error. The dogfood caller
+# (`claude-code-review.yml`) is the canonical reference; the minimum block is:
+#
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#     issues: read
+#     id-token: write
+#
+# Contexts where the review is SKIPPED, not run
+# ---------------------------------------------
+#
+# Two contexts get a SKIPPED (grey) `claude-review` check and no review, because
+# GitHub STRUCTURALLY withholds CLAUDE_CODE_OAUTH_TOKEN from them:
+#
+#   1. Dependabot-triggered runs (`github.actor == 'dependabot[bot]'`), which read
+#      the DEPENDABOT secret store rather than the Actions store. We deliberately
+#      do NOT provision the token there: dependency bumps do not get a Claude
+#      review. The gates for a bump are Dependency Review, typecheck, build, and
+#      test — not a prose review of a version string. See ADR-060.
+#   2. `pull_request` runs from FORKED head repos, to which GitHub passes no
+#      secrets at all.
+#
+# Any OTHER run reaching this reusable with an empty token is a genuine
+# misconfiguration and fails RED (`::error::` + `exit 1`).
+#
+# This REVERSES the warn-and-skip-green precheck convention used by
+# `reusable-auto-merge.yml` and `reusable-claude.yml`. Those workflows owe a
+# "NEVER blocks a PR" contract, so a missing secret there must not turn a PR red.
+# This one owes no such contract. Before #371 it skipped-green on an empty token,
+# which is exactly why Dependabot PRs reported a GREEN `claude-review` check
+# having reviewed nothing. A check that asserts a review happened must not be
+# green when the review did not run — see ADR-060.
+#
+# Why the skip lives HERE and not in the caller: the rule that callers own their
+# `if:` (below) governs POLICY filters — which PRs deserve a review. That is the
+# caller's business. These two skips are STRUCTURAL: they're a property of
+# GitHub's secret model, identical for every consumer, and a consumer who never
+# touches their caller must still get the fix.
+#
+# Optional caller-side PR-author filter (e.g. only review external
+# contributors): put the `if:` on the caller's job, not inside this reusable.
+#
+# CAVEAT (#371): this composes poorly with fork PRs. FIRST_TIME_CONTRIBUTOR PRs
+# usually arrive from a FORK, and fork PRs are skipped here — GitHub passes them
+# no secrets, so no review is possible regardless of the caller's filter. This
+# example only reaches a review for a first-time contributor pushing an in-repo
+# branch. Reviewing fork PRs would need a `pull_request_target` design with its
+# own threat model; that is explicitly out of scope.
+#
+#   jobs:
+#     claude-review:
+#       if: github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+#       uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-claude-code-review.yml@v1
+#       secrets:
+#         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#
+# `allowed_bots` (input) defaults to 'ip-automerge,ip-automerge-bot,ip-adopt-standard'
+# so consumers don't hard-fail on the action's non-human-actor guard for our
+# PR-driving automation Apps:
+#   - ip-automerge (new App) / ip-automerge-bot (legacy App) push to PR branches
+#     (e.g. praxis's update-pr-branches.yml), producing a non-human
+#     `pull_request: synchronize` event — see issue #370.
+#   - ip-adopt-standard OPENS the org-wide "adopt the standard" PRs, producing a
+#     non-human `pull_request: opened` event. Same guard, same class of actor —
+#     see issue #173 (which ratifies ip-adopt-standard as a per-capability
+#     bypass actor alongside ip-automerge/ip-labeler).
+# Override with a caller-supplied `allowed_bots:` (or '*' to allow any bot) if a
+# consumer's triggering actor differs. Note `dependabot` is deliberately
+# absent: those runs never reach the action (see the skip contract above).
+# `ip-labeler` is also absent: it only `labeled`-events PRs, which are not in
+# consumer callers' trigger types, so it can never initiate a review run.
+#
+# The upstream action (`anthropics/claude-code-action`) is covered by the
+# `anthropics/*` allow-list entry in ADR-012, so no Actions-policy change
+# is needed when a new repo adopts this reusable.
+
+name: Reusable Claude Code Review
+
+on:
+  workflow_call:
+    inputs:
+      prompt:
+        description: 'Prompt passed to the Claude Code action. Defaults to invoking the code-review plugin against the current PR.'
+        required: false
+        type: string
+        default: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+      plugins:
+        description: 'Plugins to load. Default loads the official code-review plugin from the Anthropic marketplace.'
+        required: false
+        type: string
+        default: 'code-review@claude-code-plugins'
+      plugin_marketplaces:
+        description: 'Plugin marketplaces the action should pull plugins from.'
+        required: false
+        type: string
+        default: 'https://github.com/anthropics/claude-code.git'
+      fetch-depth:
+        description: 'Depth of the checkout. 1 is sufficient for the action; bump if a custom prompt needs more history.'
+        required: false
+        type: number
+        default: 1
+      allowed_bots:
+        description: 'Comma-separated bot actors allowed to trigger the review (or "*" for all). Our automation Apps drive PRs (push branch updates for auto-merge; open adopt-standard PRs), which would otherwise hard-fail the action with "Workflow initiated by non-human actor". Defaults cover ip-automerge (new App), ip-automerge-bot (legacy App) — see #370 — and ip-adopt-standard (opens adopt-standard PRs) — see #173.'
+        required: false
+        type: string
+        default: 'ip-automerge,ip-automerge-bot,ip-adopt-standard'
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        # Declared `required: false` deliberately. The workflow_call validator runs
+        # at WORKFLOW level, before any job `if:` is evaluated — so `required: true`
+        # would reject the empty value at startup on every Dependabot and fork PR,
+        # producing an opaque 0-second startup_failure on exactly the runs the
+        # job-level `if:` below exists to skip cleanly. It also bit us when PR #39
+        # landed before the org secret was provisioned. Keep this `false`; the
+        # job-level `if:` plus the fail-red precheck are the real gates (#371).
+        description: 'OAuth token for anthropics/claude-code-action. Provisioned org-wide; see devops-excellence CLAUDE.md.'
+        required: false
+
+permissions:
+  # The auto-reviewer posts a pull-request review, so pull-requests must be
+  # write. contents stays read (the bot only reads code to review it) and
+  # issues stays read (review path doesn't touch issues). id-token is for
+  # OIDC.
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+
+jobs:
+  claude-review:
+    name: Claude Code Review
+    # Honest-skip gate for the two contexts where GitHub structurally withholds
+    # CLAUDE_CODE_OAUTH_TOKEN, making a review impossible. See the "Contexts where
+    # the review is SKIPPED" section in the header, and ADR-060.
+    #
+    # Skipping at the JOB level is the whole fix. A job whose every step is gated
+    # off by a `ready` output still concludes SUCCESS — that is what painted a
+    # GREEN `claude-review` check on Dependabot PRs that were never reviewed
+    # (#371). A job skipped by `if:` reports SKIPPED (grey) instead.
+    #
+    # Why `github.actor` and not the look-alikes:
+    #   - `github.event.pull_request.user.login` is the PR AUTHOR, not the run
+    #     initiator. A human pushing to a dependabot/* branch fires `synchronize`
+    #     WITH Actions-scoped secrets while the author is still dependabot[bot];
+    #     that run can and should be reviewed. (reusable-auto-merge.yml keys on the
+    #     author for its dependabot job — that is a MERGE-POLICY question, not a
+    #     secret-scope one. Same-looking expression, different question.)
+    #   - `github.triggering_actor` becomes the human who clicked Re-run, while
+    #     secret scope follows the ORIGINAL triggering event — so it would fail RED
+    #     on a human re-run of a Dependabot PR.
+    #   - `github.actor` is GitHub's own documented predicate for "this run reads
+    #     the Dependabot secret store". It keys on what actually decides scope.
+    #
+    # Both clauses fail SAFE — toward a skip, never toward a false green or a
+    # false red. `null != true` is true, so non-PR and same-repo contexts fall
+    # through to the fail-red precheck, which is correct.
+    if: >-
+      github.actor != 'dependabot[bot]'
+      && github.event.pull_request.head.repo.fork != true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify CLAUDE_CODE_OAUTH_TOKEN is configured
+        # Reaching this step with an empty token means a real misconfiguration —
+        # the job-level `if:` has already excluded every context where the token is
+        # LEGITIMATELY absent. So this fails RED rather than emitting a ::warning::
+        # nobody reads. Contrast reusable-auto-merge.yml, whose prechecks warn and
+        # skip because it owes a "NEVER blocks a PR" contract; this reusable does
+        # not (#371, ADR-060).
+        #
+        # There is deliberately NO `ready` output and no `if:` gate on the steps
+        # below: this step either exits 1 (job red, nothing downstream runs) or
+        # exits 0 (everything downstream runs). Gated steps behind a soft `ready`
+        # are precisely what let a tokenless job conclude SUCCESS having reviewed
+        # nothing.
+        #
+        # Do NOT put a literal secrets expression in the ::error:: text — GitHub
+        # interpolates ${{ }} inside `run:` before bash sees it, so an inline
+        # example would expand the real token into the annotation. Concrete
+        # examples live in the header, where ${{ }} is inert.
+        env:
+          OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          # ===== VERBATIM COPY: claude-review token precheck kernel — keep identical to
+          # test-claude-review-precheck.yml. =====
+          if [ -z "${OAUTH_TOKEN:-}" ]; then
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN is empty in the Actions secrets scope, and this run is not a known-tokenless context (Dependabot-triggered runs and fork PRs are skipped at the job level, by design — see issue #371). Fix 1, provision the org secret: run 'claude setup-token' locally to mint a long-lived token, then: gh secret set CLAUDE_CODE_OAUTH_TOKEN --org Integral-Productivity --visibility all. Fix 2, check that your caller workflow forwards the secret under its own 'secrets:' block — see the header of reusable-claude-code-review.yml for the canonical caller."
+            exit 1
+          fi
+          echo "CLAUDE_CODE_OAUTH_TOKEN is present — running the review."
+          # ===== END VERBATIM COPY =====
+
+      - name: Check out repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: ${{ inputs.plugin_marketplaces }}
+          plugins: ${{ inputs.plugins }}
+          prompt: ${{ inputs.prompt }}
+          allowed_bots: ${{ inputs.allowed_bots }}

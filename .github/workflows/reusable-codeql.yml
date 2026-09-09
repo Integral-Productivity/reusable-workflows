@@ -1,0 +1,137 @@
+# Reusable CodeQL analysis — PUBLIC HOST copy.
+#
+# This is the public-repo-consumable copy of a reusable that also lives in the
+# PRIVATE `devops-excellence` repo. GitHub does not let a PUBLIC or INTERNAL
+# repo resolve a reusable workflow — or a composite action — hosted in a
+# PRIVATE repo. The call dies at compile time with a run-level
+# `startup_failure`: zero jobs, no logs, no annotations, and only "this run
+# likely failed because of a workflow file issue" in the UI. Setting
+# `access_level: organization` on the private host does NOT lift this; it
+# admits private same-org callers only. Public and internal repos must
+# therefore reference THIS host.
+#
+# Lineage: devops-excellence ADR-038 / ADR-049 (this public host), ADR-065
+# (the uniform public-host model for public and internal alike), ADR-084
+# (visibility is the host axis; staged convergence on one public host) and
+# ADR-088 (the private-host reusable set is closed).
+#
+# Ported by devops-excellence#611 — ADR-084 Stage B. See RWF-005 in this repo
+# for the header-only-delta convention every file in this port follows.
+#
+# What it does
+# ------------
+# Initializes CodeQL, autobuilds, and analyzes, for the comma-separated
+# `languages` input (default `javascript-typescript`).
+#
+# NOTE: GitHub does not allow reusable workflows to define `schedule` triggers.
+# Callers MUST set their own schedule (typically weekly, Monday 08:00 UTC) by
+# adding `on: schedule:` in the caller workflow.
+#
+# Credential surface — IDENTICAL to the private copy, and EMPTY
+# -------------------------------------------------------------
+# This workflow declares NO `secrets:` block at all. It takes one input
+# (`languages`) and nothing else. It reads no 1Password PEM, mints no GitHub
+# App token, and forwards no secret to any step. There is consequently nothing
+# for the ADR-065 whole-vault hazard to attach to.
+#
+# NEVER forward `OP_SERVICE_ACCOUNT_TOKEN` — or any other secret — to this
+# workflow. Passing a secret a reusable does not declare fails the run at
+# startup (ADR-045, ADR-065), and this reusable declares none.
+#
+# Permissions, and why they behave differently on a public repo
+# --------------------------------------------------------------
+# Unlike the other four reusables in this port, this one DOES declare a
+# workflow-level `permissions:` block (`actions: read`, `contents: read`,
+# `security-events: write`), because CodeQL's analyze step uploads SARIF. A
+# reusable can only USE permissions the caller has GRANTED, so the caller must
+# declare at least the same three or the call is rejected at startup with the
+# "is requesting X, is only allowed Y" error.
+#
+# `security-events: write` is the reason this file needed a witnessed run on a
+# real PUBLIC repo before this port could be called done, rather than a reading
+# of the YAML: code scanning is free on public repos but gated by Advanced
+# Security on private ones, and the upload path differs accordingly.
+#
+# What the witnessed run established (KNOWN BLOCKER — read before adopting)
+# -------------------------------------------------------------------------
+# Witnessed 2026-09-09 on this PUBLIC repo, via the `codeql.yml` dogfood caller
+# in this directory (reusable-workflows PR #53, `languages: actions`).
+#
+# The reusable itself works. It resolved from the public host, the caller's
+# three permissions were accepted, CodeQL init and autobuild succeeded, the
+# database was built and the queries ran — all in ~40s. The run then FAILED at
+# the SARIF upload with:
+#
+#   Code Scanning could not process the submitted SARIF file:
+#   CodeQL analyses from advanced configurations cannot be processed when the
+#   default setup is enabled
+#
+# That is a REPOSITORY-CONFIGURATION conflict, not a permissions failure and
+# not a public-vs-private one. Code scanning **default setup** and an
+# **advanced setup** workflow — which is what this reusable is — are mutually
+# exclusive on a repo. GitHub accepts the run and rejects the upload.
+#
+# Measured the same day, this is org-wide rather than particular to this repo:
+#   - All 28 active PUBLIC repos in Integral-Productivity have default setup
+#     `configured`.
+#   - All five tier-1 PRIVATE repos do too, AND each already has a `codeql.yml`
+#     caller. Their scheduled runs have been failing continuously — the
+#     `devops-excellence` weekly run fails with this exact annotation, going
+#     back at least to 2026-08-17.
+#
+# So this reusable currently has NO repo in the org it can succeed on, on
+# either host. That predates and is independent of this port. Adopting it
+# requires first disabling default setup on the consumer repo (Settings ->
+# Code security -> Code scanning), which trades default setup's `extended`
+# query suite and managed schedule for a caller-owned schedule and the
+# `default` suite. Tracked in devops-excellence#664.
+#
+# Declared delta from the private copy
+# ------------------------------------
+# THIS HEADER ONLY. Everything from `name:` down is byte-identical to
+# `devops-excellence/.github/workflows/reusable-codeql.yml`. That is the
+# declared-delta surface the drift check in devops-excellence#612 reads.
+#
+# Callers
+# -------
+#   uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-codeql.yml@v1
+#
+# Reproducibility-critical callers may pin an exact release, e.g. `@v1.2.0`;
+# see RWF-002 for this repo's moving-`@v1` policy.
+
+name: Reusable CodeQL
+
+on:
+  workflow_call:
+    inputs:
+      languages:
+        description: 'Comma-separated list of CodeQL languages to analyze.'
+        required: false
+        type: string
+        default: 'javascript-typescript'
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (${{ inputs.languages }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4.37.9
+        with:
+          languages: ${{ inputs.languages }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4.37.9
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4.37.9
+        with:
+          category: '/language:${{ inputs.languages }}'

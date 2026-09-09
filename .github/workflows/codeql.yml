@@ -1,0 +1,76 @@
+# Dogfood caller for `reusable-codeql.yml` — MANUAL TRIGGER ONLY.
+#
+# Why this file exists: devops-excellence#611 (ADR-084 Stage B) requires that
+# `reusable-codeql` be verified working on a PUBLIC repo before the port counts
+# as done — `security-events: write` and the SARIF upload path behave
+# differently on a public repo than on a private one, and a green YAML parse
+# proves nothing about either. This repo is public, so calling the reusable
+# from inside it is the witness.
+#
+# What the witness found, and why this is `workflow_dispatch` only
+# ----------------------------------------------------------------
+# Run on 2026-09-09 (PR #53, run 34403558409): the reusable WORKED. It resolved
+# from this host, the three permissions below were accepted, CodeQL init and
+# autobuild succeeded, the database was built and the queries ran, in ~40s. The
+# SARIF upload was then rejected:
+#
+#   Code Scanning could not process the submitted SARIF file:
+#   CodeQL analyses from advanced configurations cannot be processed when the
+#   default setup is enabled
+#
+# Code scanning **default setup** and an **advanced setup** workflow — which is
+# what the reusable is — are mutually exclusive on a repo. This repo has
+# default setup configured (`actions`, `extended` suite, weekly), so every run
+# of this caller will fail at the upload until that is turned off.
+#
+# Measured the same day, that is true of all 28 active public repos in the org
+# and all five tier-1 private repos, whose own `codeql.yml` callers have been
+# failing on this exact annotation since at least 2026-08-17. The org-wide
+# decision — keep default setup and retire the reusable, or move to advanced
+# setup — is devops-excellence#664.
+#
+# So the triggers are deliberately reduced to `workflow_dispatch`. Firing this
+# on `pull_request` / `push` / `schedule` would paint a permanently-red check
+# that scans nothing, while default setup quietly does the real scanning —
+# which is precisely the masked-breakage pattern #664 is about. Kept wired, and
+# manually runnable, so that whoever resolves #664 in favour of advanced setup
+# has the caller ready rather than having to rebuild it.
+#
+# It calls the LOCAL path (`./.github/workflows/...`) rather than `@v1`, which
+# is what makes it a dogfood: it exercises the reusable as it stands on this
+# ref, before a release moves `v1` onto it. ADR-084 notes a local-path dogfood
+# does not exercise the `@v1` resolution consumers depend on; that gap is real
+# here too, and is what Stage D addresses.
+#
+# `languages: actions` rather than the reusable's `javascript-typescript`
+# default: this repo is workflows and shell, with no JavaScript or TypeScript
+# for CodeQL to see. Pointing it at `javascript-typescript` would fail with
+# "No source code was seen during the build" — a fact about this repo's
+# contents, not about the reusable.
+#
+# The caller declares the same three permissions the reusable declares. A
+# reusable can only USE permissions the caller GRANTED, so anything narrower is
+# rejected at startup with the "is requesting X, is only allowed Y" error.
+#
+# A consumer adopting this reusable for real needs its own `schedule:` — GitHub
+# does not allow a reusable workflow to define `schedule` triggers.
+name: CodeQL
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  codeql:
+    name: CodeQL
+    uses: ./.github/workflows/reusable-codeql.yml
+    with:
+      languages: actions
