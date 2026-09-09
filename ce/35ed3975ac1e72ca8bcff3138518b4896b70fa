@@ -1,0 +1,20 @@
+.github/workflows/reusable-codeql.yml
+  s_71438658e999f1::t_dfaf099592da7a 87
+  s_71438658e999f1::t_547849d6e9e696 53-86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "ce35ed3975ac1e72ca8bcff3138518b4896b70fa",
+  "prompts": {},
+  "sessions": {
+    "s_71438658e999f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4693d4db-cbab-4b66-9851-941564220e89",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Kraig Parkinson <kraig.parkinson@gmail.com>"
+    }
+  }
+}
