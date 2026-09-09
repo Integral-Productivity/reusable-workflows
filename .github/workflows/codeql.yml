@@ -1,0 +1,52 @@
+# Dogfood caller for `reusable-codeql.yml`.
+#
+# Why this file exists: devops-excellence#611 (ADR-084 Stage B) requires that
+# `reusable-codeql` be verified working on a PUBLIC repo before the port counts
+# as done — `security-events: write` and the SARIF upload path behave
+# differently on a public repo than on a private one, and a green YAML parse
+# proves nothing about either. This repo is public, so calling the reusable
+# from inside it is the witness.
+#
+# It calls the LOCAL path (`./.github/workflows/...`) rather than `@v1`. That
+# is deliberate for a dogfood: the point is to exercise the reusable as it
+# stands on this branch, before a release moves `v1` onto it. ADR-084 notes
+# that a local-path dogfood does not exercise the `@v1` resolution consumers
+# actually depend on; that gap is real here too, and is what Stage D is for.
+#
+# `languages: actions` rather than the reusable's `javascript-typescript`
+# default: this repo is workflows and shell, with no JavaScript or TypeScript
+# for CodeQL to see. Pointing it at `javascript-typescript` would fail with
+# "No source code was seen during the build" — a failure about this repo's
+# contents, not about the reusable.
+#
+# The caller declares the same three permissions the reusable declares. A
+# reusable can only USE permissions the caller GRANTED, so anything narrower
+# is rejected at startup with the "is requesting X, is only allowed Y" error.
+#
+# The schedule lives here, not in the reusable: GitHub does not allow a
+# reusable workflow to define `schedule` triggers.
+name: CodeQL
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, Monday 08:00 UTC — the org convention.
+    - cron: '0 8 * * 1'
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  codeql:
+    name: CodeQL
+    uses: ./.github/workflows/reusable-codeql.yml
+    with:
+      languages: actions

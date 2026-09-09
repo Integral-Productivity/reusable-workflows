@@ -1,0 +1,219 @@
+# Reusable BDD (Cucumber) scenarios — PUBLIC HOST copy.
+#
+# This is the public-repo-consumable copy of a reusable that also lives in the
+# PRIVATE `devops-excellence` repo. GitHub does not let a PUBLIC or INTERNAL
+# repo resolve a reusable workflow — or a composite action — hosted in a
+# PRIVATE repo. The call dies at compile time with a run-level
+# `startup_failure`: zero jobs, no logs, no annotations, and only "this run
+# likely failed because of a workflow file issue" in the UI. Setting
+# `access_level: organization` on the private host does NOT lift this; it
+# admits private same-org callers only. Public and internal repos must
+# therefore reference THIS host.
+#
+# Lineage: devops-excellence ADR-038 / ADR-049 (this public host), ADR-065
+# (the uniform public-host model for public and internal alike), ADR-084
+# (visibility is the host axis; staged convergence on one public host) and
+# ADR-088 (the private-host reusable set is closed).
+#
+# Ported by devops-excellence#611 — ADR-084 Stage B. See RWF-005 in this repo
+# for the header-only-delta convention every file in this port follows.
+#
+# What it does
+# ------------
+# Runs the caller repo's offline behaviour suite via its `bdd` package script.
+# A standard, org-shareable PR gate for repos that document behaviour as
+# Cucumber `features/` (devops-excellence ADR-044). The caller must expose a
+# `bdd` package script.
+#
+# Package managers:
+#   - pnpm (default): for workspaces and repos that already use pnpm.
+#   - npm: required by devops-excellence ADR-016 for repos that consume
+#     @integral-productivity/* from GitHub Packages.
+#
+# The suite is expected to be self-contained — no org or network access, run
+# against in-repo fixtures and stubs — so this reusable needs only
+# `contents: read`. That property is what makes it safe to run unchanged on a
+# public runner: there is nothing org-private for a public caller to reach.
+#
+# Credential surface — IDENTICAL to the private copy
+# --------------------------------------------------
+# One optional secret, and it is the same one the private copy declares:
+#
+#   NODE_AUTH_TOKEN (required: false) — a GitHub Packages registry token. Only
+#     callers whose @integral-productivity/* dependencies resolve from
+#     npm.pkg.github.com need it; pnpm workspace: / link: consumers do not, and
+#     the in-workflow guard below detects which case applies before failing.
+#
+# This copy reads NO 1Password PEM and mints NO GitHub App token, so the
+# ADR-065 whole-vault hazard does not apply to it. Contrast
+# `reusable-auto-merge.yml` in this same directory, whose header carries a
+# "Credential surface (differs from the private copy)" section because it DOES
+# mint App tokens and therefore had to swap whole-vault
+# `OP_SERVICE_ACCOUNT_TOKEN` for the scoped `OP_*_PUBLIC_TOKEN` form (ADR-045 /
+# ADR-078). Nothing of that kind is needed here.
+#
+# NEVER forward `OP_SERVICE_ACCOUNT_TOKEN` to this workflow. It is read-only
+# across the WHOLE `ip-automation` vault, so a leak on a public runner reads
+# every App PEM there including the org-admin `ip-org-writer`. It is also not
+# declared below, and passing a secret a reusable does not declare fails the
+# run at startup (ADR-045, ADR-065).
+#
+# Declared delta from the private copy
+# ------------------------------------
+# THIS HEADER ONLY. Everything from `name:` down is byte-identical to
+# `devops-excellence/.github/workflows/reusable-bdd.yml`. That is the
+# declared-delta surface the drift check in devops-excellence#612 reads.
+#
+# Callers
+# -------
+#   uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-bdd.yml@v1
+#
+# Callers must grant at minimum `contents: read`. Reproducibility-critical
+# callers may pin an exact release, e.g. `@v1.2.0`; see RWF-002 for this repo's
+# moving-`@v1` policy.
+
+name: Reusable BDD
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js major version to install.'
+        required: false
+        type: string
+        default: '22'
+      package-manager:
+        description: 'Package manager: pnpm (default) or npm. npm callers must pass NODE_AUTH_TOKEN if they install from GitHub Packages.'
+        required: false
+        type: string
+        default: 'pnpm'
+      report-path:
+        description: 'Path to the Cucumber HTML report to upload as an artifact (e.g. reports/cucumber.html). Leave unset to skip the upload.'
+        required: false
+        type: string
+        default: ''
+      report-name:
+        description: 'Artifact name for the uploaded Cucumber report.'
+        required: false
+        type: string
+        default: 'cucumber-report'
+    secrets:
+      NODE_AUTH_TOKEN:
+        description: 'Token for authenticating to GitHub Packages (npm registry). Required for callers whose @integral-productivity/* dependencies resolve from GitHub Packages rather than a workspace: link.'
+        required: false
+
+# Permissions are deliberately NOT declared at the workflow level: a reusable
+# workflow cannot extend the caller's GITHUB_TOKEN, so a broad declaration
+# here would cause startup_failure when the caller grants something narrower.
+# Callers must grant at minimum: contents: read.
+
+# Pipefail-safe shell default (ADR-043): GitHub expands `shell: bash` to
+# `bash --noprofile --norc -eo pipefail {0}`.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  scenarios:
+    name: Scenarios
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # An unrecognised value would otherwise skip BOTH the pnpm setup and the
+      # pnpm install expression branch, and surface several steps later as an
+      # opaque `npm ci` failure in a repo that has no package-lock.json. Fail
+      # here, naming the value.
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            pnpm|npm) ;;
+            *)
+              echo "::error::package-manager must be 'pnpm' or 'npm', got '$PACKAGE_MANAGER'."
+              exit 1
+              ;;
+          esac
+
+      - name: Setup pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6.0.9
+
+      # `cache` is wired to the input rather than pinned to a literal: both
+      # 'pnpm' and 'npm' are valid actions/setup-node cache values, and each
+      # auto-detects its own lockfile. Pinning it would also be a policy knob
+      # hardcoded on a wrapped third-party action (ADR-061).
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@integral-productivity'
+
+      # An empty NODE_AUTH_TOKEN means the install step will 401 on
+      # npm.pkg.github.com — but ONLY for projects that actually install from
+      # GitHub Packages. pnpm workspace consumers historically resolve every
+      # @integral-productivity/* dependency as workspace:* (link:, zero
+      # registry tarballs), so a workspace: version specifier must NOT count
+      # as a GitHub Packages dependency, or every workspace repo would be
+      # failed for a token it never needed.
+      #
+      # Detect whether GitHub Packages is in play before guarding, package
+      # manager agnostically (#617 — this reusable now serves pnpm and npm):
+      #   1. The lockfile, when present, is authoritative: both
+      #      'pnpm install --frozen-lockfile' and 'npm ci' independently reject
+      #      a lockfile that drifted from package.json, so trusting it here
+      #      never masks a real mismatch. Grep it for npm.pkg.github.com.
+      #   2. Only when no lockfile exists at all, fall back to scanning
+      #      package.json dependencies/devDependencies/peerDependencies/
+      #      optionalDependencies for an @integral-productivity/ entry whose
+      #      version specifier is not one of pnpm's local-resolution
+      #      protocols (workspace:, link:, file:, portal:). npm callers never
+      #      carry those specifiers, so the same predicate serves both.
+      # If neither signals GitHub Packages, skip the guard entirely (a
+      # public-only or workspace-only caller forwarding no token is expected
+      # and must stay green).
+      - name: Verify GitHub Packages auth token is present
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: |
+          uses_github_packages=false
+          if [ -f pnpm-lock.yaml ]; then
+            if grep -q 'npm.pkg.github.com' pnpm-lock.yaml; then
+              uses_github_packages=true
+            fi
+          elif [ -f package-lock.json ]; then
+            if grep -q 'npm.pkg.github.com' package-lock.json; then
+              uses_github_packages=true
+            fi
+          elif [ -f package.json ] && node -e 'const p=require("./package.json");const d={...(p.dependencies||{}),...(p.devDependencies||{}),...(p.peerDependencies||{}),...(p.optionalDependencies||{})};process.exit(Object.entries(d).some(([k,v])=>k.startsWith("@integral-productivity/")&&!/^(workspace|link|file|portal):/.test(String(v)))?0:1)'; then
+            uses_github_packages=true
+          fi
+
+          if [ "$uses_github_packages" != "true" ]; then
+            echo "No GitHub Packages dependencies detected; skipping NODE_AUTH_TOKEN guard."
+            exit 0
+          fi
+
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NODE_AUTH_TOKEN is empty — the install step will 401 on npm.pkg.github.com. If this is a Dependabot PR, add the registry token to the *Dependabot* secret store (Settings → Secrets and variables → Dependabot), which is separate from Actions secrets, or have the caller pass a fallback such as ${{ '${{' }} secrets.NODE_AUTH_TOKEN || secrets.DEPENDABOT_PACKAGES_TOKEN ${{ '}}' }}."
+            exit 1
+          fi
+
+      - name: Install
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+        run: ${{ inputs.package-manager == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+
+      - name: Run BDD scenarios
+        run: ${{ inputs.package-manager == 'pnpm' && 'pnpm bdd' || 'npm run bdd' }}
+
+      - name: Upload Cucumber HTML report
+        if: always() && inputs.report-path != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.report-name }}
+          path: ${{ inputs.report-path }}
