@@ -1,0 +1,135 @@
+# Reusable Git AI notes carry-forward.
+#
+# Every Integral-Productivity repo squash-merges, and Git AI stores per-line
+# attribution as git notes under `refs/notes/ai`, keyed by commit SHA. The
+# squash creates a new SHA, so without this job the notes stay on branch commits
+# that are then discarded and `main` reads as 100% "untracked". This job runs
+# `git-ai ci github run`, which maps the squash commit back to the PR's original
+# commits and rewrites their notes onto it, then pushes `refs/notes/ai`.
+#
+# Decision: devops-excellence ADR-095 (issue devops-excellence#707), which
+# implements claude-config ADR-0012 decision 4.
+#
+# PUBLIC HOST, NO PRIVATE TWIN. This reusable exists only here; there is no
+# copy in devops-excellence to diverge from (RWF-005). It takes no secrets.
+#
+# Why not the stock workflow: `git-ai ci github install` generates a job that
+# runs `curl -fsSL https://usegitai.com/install.sh | bash`, unpinned, while
+# holding `contents: write`. This file installs the release binary directly and
+# verifies it three ways before it runs (ADR-095 §1):
+#   1. belt       — its SHA-256 matches the digest pinned below;
+#   2. suspenders — that digest is also the one the release's SHA256SUMS lists;
+#   3. lifestyle  — `gh attestation verify` proves git-ai-project's own release
+#                   workflow built it, on a GitHub-hosted runner, from `main`.
+# The git-ai release is NOT immutable (`immutable: false` on v1.7.5), so (1) is
+# the load-bearing check; (2) and (3) catch a mistaken bump of (1).
+#
+# To bump: change GIT_AI_VERSION and GIT_AI_SHA256 together in one reviewed PR.
+# Dependabot cannot see this pin. Take the digest from the release's SHA256SUMS
+# *and* recompute it from the downloaded binary; the two must agree.
+#
+# Caller contract (see README):
+#   on:
+#     pull_request:
+#       types: [closed, synchronize]
+#   jobs:
+#     git-ai-notes:
+#       permissions:
+#         contents: write
+#       uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-git-ai-notes.yml@<sha> # vX.Y.Z
+
+name: Reusable Git AI Notes
+
+on:
+  workflow_call:
+
+# Nothing at workflow level; the one job below declares exactly what it needs.
+permissions: {}
+
+jobs:
+  carry-notes:
+    name: Carry Git AI notes
+    # - `closed` + merged: rewrite the PR's notes onto the squash commit.
+    # - `synchronize`: carry notes across a server-side branch rewrite (e.g. the
+    #   web UI's "Update branch" rebase), which local git-ai hooks never see.
+    # - Fork PRs are skipped: their GITHUB_TOKEN is read-only, so the notes push
+    #   would fail, and org repos do not take fork PRs in practice (ADR-095 §4).
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && (
+        (github.event.action == 'closed' && github.event.pull_request.merged == true)
+        || github.event.action == 'synchronize'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Pushes `refs/notes/ai` only. It is not a branch, so no branch ruleset
+      # applies to it, and GITHUB_TOKEN is sufficient (ADR-095 §5).
+      contents: write
+    # Serialize runs for the same PR (a synchronize racing the merge). Distinct
+    # PRs may run concurrently: git-ai retries its fetch-merge-push of the notes
+    # ref on a non-fast-forward rejection.
+    concurrency:
+      group: git-ai-notes-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Install git-ai (pinned, verified)
+        env:
+          GIT_AI_VERSION: 1.7.5
+          GIT_AI_SHA256: 6cf68a83cc948fbd4675e46bc5e3c50973c04257bb43a954a6712a2107206695
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "$(uname -m)" = "x86_64" ] || { echo "::error::git-ai pin is for linux-x64; runner is $(uname -m)"; exit 1; }
+
+          bin="git-ai-linux-x64"
+          base="https://github.com/git-ai-project/git-ai/releases/download/v${GIT_AI_VERSION}"
+          dir="${RUNNER_TEMP}/git-ai"
+          mkdir -p "$dir/bin"
+          cd "$dir"
+          curl --fail --silent --show-error --location --retry 3 --output "$bin" "${base}/${bin}"
+          curl --fail --silent --show-error --location --retry 3 --output SHA256SUMS "${base}/SHA256SUMS"
+
+          # 1. belt: the pinned digest.
+          echo "${GIT_AI_SHA256}  ${bin}" | sha256sum --check --strict -
+
+          # 2. suspenders: the release's own checksum list agrees with the pin.
+          if ! grep -qxF "${GIT_AI_SHA256}  ${bin}" SHA256SUMS; then
+            echo "::error::SHA256SUMS for v${GIT_AI_VERSION} does not list the pinned digest for ${bin}"
+            exit 1
+          fi
+
+          # 3. lifestyle: build provenance from git-ai-project's release workflow.
+          gh attestation verify "$bin" \
+            --repo git-ai-project/git-ai \
+            --signer-workflow git-ai-project/git-ai/.github/workflows/release.yml \
+            --source-ref refs/heads/main \
+            --deny-self-hosted-runners
+
+          install -m 0755 "$bin" "$dir/bin/git-ai"
+          echo "$dir/bin" >> "$GITHUB_PATH"
+          "$dir/bin/git-ai" --version
+
+      # claude-config ADR-0012 decision 2: nothing goes to usegitai.com. The
+      # binary's defaults send OSS telemetry and upload daemon logs, so turn both
+      # off before the first real invocation. The run stays logged out.
+      - name: Disable git-ai telemetry
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.git-ai"
+          cat > "$HOME/.git-ai/config.json" <<'JSON'
+          {
+            "telemetry_oss": "off",
+            "feature_flags": { "daemon_log_upload": false }
+          }
+          JSON
+
+      - name: Carry notes onto the rewritten commits
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git-ai ci github run

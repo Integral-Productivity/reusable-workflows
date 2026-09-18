@@ -127,6 +127,7 @@ Consequences and add a row to the table above.
 | [`reusable-dependency-review.yml`](.github/workflows/reusable-dependency-review.yml) | Fail a PR if a dependency change adds a `moderate`+ vulnerability (auth-free, no secrets). |
 | [`reusable-claude.yml`](.github/workflows/reusable-claude.yml) | The `@claude` on-demand bot. Needs the org secret `CLAUDE_CODE_OAUTH_TOKEN` (visibility:all). |
 | [`reusable-auto-merge.yml`](.github/workflows/reusable-auto-merge.yml) | Queue `claude/*` + `release-please--*` + Dependabot (patch/minor) PRs for auto-merge. Needs the **scoped** org secret `OP_AUTOMERGE_PUBLIC_TOKEN` (read-only on the `ip-automerge` PEM only). |
+| [`reusable-git-ai-notes.yml`](.github/workflows/reusable-git-ai-notes.yml) | Carry [Git AI](https://usegitai.com) attribution notes (`refs/notes/ai`) onto squash-merge commits. Installs a version- and SHA-256-pinned, attestation-verified git-ai binary; no secrets. devops-excellence ADR-095. |
 
 ### `validate-plugin-manifest.yml`
 
@@ -153,6 +154,34 @@ jobs:
 The caller must grant `permissions: contents: read` (reusable workflows can only
 use permissions the caller grants). No secrets are needed — `claude plugin
 validate` is a local, auth-free schema check.
+
+### `reusable-git-ai-notes.yml`
+
+```yaml
+name: Git AI notes
+on:
+  pull_request:
+    types: [closed, synchronize]
+permissions: {}
+jobs:
+  git-ai-notes:
+    permissions:
+      contents: write
+    uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-git-ai-notes.yml@<sha> # vX.Y.Z
+```
+
+Squash-merge gives the merged commit a new SHA, and Git AI keys its notes by
+SHA, so without this job attribution never reaches `main`. On a merged PR it
+runs `git-ai ci github run`, which rewrites the PR's notes onto the squash
+commit and pushes `refs/notes/ai`; on `synchronize` it carries notes across a
+server-side branch rewrite. Fork PRs are skipped.
+
+The caller grants `contents: write` on the calling job only (the notes push).
+`GITHUB_TOKEN` is enough: `refs/notes/ai` is not a branch, so branch rulesets do
+not apply. Telemetry to usegitai.com is turned off inside the job. Read notes
+back with `git-ai fetch-notes` then `git-ai stats <sha>`. Decision and
+verification design: devops-excellence
+[ADR-095](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-095-git-ai-notes-carried-across-squash-merges-by-a-pinned-reusable.md).
 
 ### `reusable-dependency-review.yml`
 
