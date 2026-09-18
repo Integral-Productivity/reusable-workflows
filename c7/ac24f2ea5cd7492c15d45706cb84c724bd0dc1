@@ -1,0 +1,21 @@
+.github/workflows/reusable-git-ai-notes.yml
+  s_3d121fd5cbb254::t_7b0e8046640eac 1-135
+README.md
+  s_3d121fd5cbb254::t_e94b89733c1755 130,158-185
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c7ac24f2ea5cd7492c15d45706cb84c724bd0dc1",
+  "prompts": {},
+  "sessions": {
+    "s_3d121fd5cbb254": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b8cc24c6-f9a2-4cc6-bd05-2ed474fc996c",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Kraig Parkinson <kraigparkinson@integralproductivity.com>"
+    }
+  }
+}
