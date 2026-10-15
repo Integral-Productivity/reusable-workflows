@@ -123,7 +123,7 @@ Consequences and add a row to the table above.
 
 | Workflow | Purpose |
 |---|---|
-| [`validate-plugin-manifest.yml`](.github/workflows/validate-plugin-manifest.yml) | Run `claude plugin validate <manifest>` as a PR gate (auth-free, no secrets). |
+| [`validate-plugin-manifest.yml`](.github/workflows/validate-plugin-manifest.yml) | Run `claude plugin validate <manifest>` and Claude's plugin upload limits as a PR gate (auth-free, no secrets). |
 | [`reusable-dependency-review.yml`](.github/workflows/reusable-dependency-review.yml) | Fail a PR if a dependency change adds a `moderate`+ vulnerability (auth-free, no secrets). |
 | [`reusable-claude.yml`](.github/workflows/reusable-claude.yml) | The `@claude` on-demand bot. Needs the org secret `CLAUDE_CODE_OAUTH_TOKEN` (visibility:all). |
 | [`reusable-auto-merge.yml`](.github/workflows/reusable-auto-merge.yml) | Queue `claude/*` + `release-please--*` + Dependabot (patch/minor) PRs for auto-merge. Needs the **scoped** org secret `OP_AUTOMERGE_PUBLIC_TOKEN` (read-only on the `ip-automerge` PEM only). |
@@ -150,6 +150,7 @@ jobs:
 | Input | Default | Description |
 |---|---|---|
 | `manifest-path` | `.claude-plugin/plugin.json` | Path to the manifest to validate. The marketplace repo passes `.claude-plugin/marketplace.json`. |
+| `upload-limits` | `error` | `error`, `warn` or `off`. Also checks the limits Claude's plugin upload validator enforces and `claude plugin validate` does not: `plugin.json` `description` ≤ 500 characters, and every `skills/*/SKILL.md` has a `name` and a `description` ≤ 1024 characters. Runs only for a `plugin.json` manifest. `warn` annotates without failing, for a caller that cannot fix a violation yet (devops-excellence#777). |
 
 The caller must grant `permissions: contents: read` (reusable workflows can only
 use permissions the caller grants). No secrets are needed — `claude plugin
