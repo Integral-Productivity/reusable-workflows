@@ -86,3 +86,9 @@ jobs:
       # job already relies on above.
       - name: Test check-auto-merge-required-status.sh
         run: bash scripts/check-auto-merge-required-status.test.sh
+
+      # The upload-limits check that validate-plugin-manifest.yml runs inside
+      # every plugin caller (devops-excellence#777). node:test, no dependencies;
+      # ubuntu-latest ships Node.
+      - name: Test check-upload-limits.mjs
+        run: node --test scripts/check-upload-limits.test.mjs
