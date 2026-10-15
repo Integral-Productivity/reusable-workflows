@@ -28,7 +28,7 @@
 #       uses: Integral-Productivity/reusable-workflows/.github/workflows/validate-plugin-manifest.yml@v1
 #       # with:
 #       #   manifest-path: .claude-plugin/marketplace.json   # default is plugin.json
-#       #   upload-limits: error                              # default is warn
+#       #   upload-limits: warn                               # default is error
 #
 # Inputs
 # ------
@@ -38,7 +38,7 @@
 #     repos use the default; the marketplace repo passes
 #     `.claude-plugin/marketplace.json`.
 #
-#   upload-limits  (default: warn)   one of: error | warn | off
+#   upload-limits  (default: error)   one of: error | warn | off
 #     Also check the limits Claude's plugin UPLOAD validator (Customize >
 #     Plugins) enforces and `claude plugin validate` does not: plugin.json
 #     `description` <= 500 characters; every skills/*/SKILL.md has a `name` and
@@ -46,9 +46,8 @@
 #     Claude Desktop and Chat projects on a personal plan, so without this a
 #     green gate does not mean the plugin is installable there
 #     (devops-excellence#777, ADR-038 decision 6). `warn` annotates the run and
-#     exits 0; `error` fails the job. The default is `warn` because `@v1`
-#     callers inherit this change unasked and some plugins were over a limit
-#     when it shipped; it flips to `error` once they are fixed. Runs only when
+#     exits 0; `error` fails the job. A caller with a known violation it cannot
+#     fix yet can pass `warn` for a while. Runs only when
 #     `manifest-path` names a `plugin.json` (a marketplace manifest has no
 #     upload limits). The plugin root is the parent of the manifest's directory.
 #
@@ -78,7 +77,7 @@ on:
         description: "Check Claude's plugin upload limits: error | warn | off."
         required: false
         type: string
-        default: warn
+        default: error
 
 permissions:
   contents: read

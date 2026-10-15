@@ -150,7 +150,7 @@ jobs:
 | Input | Default | Description |
 |---|---|---|
 | `manifest-path` | `.claude-plugin/plugin.json` | Path to the manifest to validate. The marketplace repo passes `.claude-plugin/marketplace.json`. |
-| `upload-limits` | `warn` | `error`, `warn` or `off`. Also checks the limits Claude's plugin upload validator enforces and `claude plugin validate` does not: `plugin.json` `description` ≤ 500 characters, and every `skills/*/SKILL.md` has a `name` and a `description` ≤ 1024 characters. Runs only for a `plugin.json` manifest. `warn` annotates without failing; the default moves to `error` once current plugins are inside the limits (devops-excellence#777). |
+| `upload-limits` | `error` | `error`, `warn` or `off`. Also checks the limits Claude's plugin upload validator enforces and `claude plugin validate` does not: `plugin.json` `description` ≤ 500 characters, and every `skills/*/SKILL.md` has a `name` and a `description` ≤ 1024 characters. Runs only for a `plugin.json` manifest. `warn` annotates without failing, for a caller that cannot fix a violation yet (devops-excellence#777). |
 
 The caller must grant `permissions: contents: read` (reusable workflows can only
 use permissions the caller grants). No secrets are needed — `claude plugin
