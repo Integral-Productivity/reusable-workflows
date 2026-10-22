@@ -70,6 +70,7 @@ const HOST_AND_PATH = /(?<![\w.-])((?:[a-z0-9-]+\.)+[a-z]{2,})(\/[^\s"'`<>()\[\]
 const HOST_RULES = [
   ['Google Docs link', (host, path) => host === 'docs.google.com' && /^\/(?:document|spreadsheets|presentation|forms|drawings)\/d\//.test(path)],
   ['Google Drive link', (host, path) => host === 'drive.google.com' && path.length > 1],
+  ['Vercel project URL', (host, path) => (host === 'vercel.com' || host === 'www.vercel.com') && /^\/[\w-]+\/[\w-]+/.test(path) && !VERCEL_PUBLIC.has(path.split('/')[1].toLowerCase())],
   ['HubSpot portal or record link', (host, path) => /^app(?:-[a-z0-9]+)?$/.test(host.split('.')[0]) && host.split('.').slice(1).join('.') === 'hubspot.com' && /^\/[\w-]+\/\d{5,}/.test(path)],
 ];
 
@@ -83,11 +84,6 @@ function hostLinks(line) {
   return [...found];
 }
 
-function vercelProject(line) {
-  for (const m of line.matchAll(/vercel\.com\/([\w-]+)\/[\w-]+/g)) if (!VERCEL_PUBLIC.has(m[1].toLowerCase())) return true;
-  return false;
-}
-
 function homePath(line) {
   for (const m of line.matchAll(/(?:\/Users\/|\/home\/|[A-Za-z]:\\Users\\)([A-Za-z][\w.-]*)/g)) {
     if (!PLACEHOLDER_USERS.has(m[1].toLowerCase())) return true;
@@ -97,7 +93,6 @@ function homePath(line) {
 
 export function locatorsIn(line) {
   const found = [...LOCATOR_PATTERNS.filter(([, re]) => re().test(line)).map(([name]) => name), ...hostLinks(line)];
-  if (vercelProject(line)) found.push('Vercel project URL');
   if (homePath(line)) found.push('absolute path with a user name');
   return found;
 }

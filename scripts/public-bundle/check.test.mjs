@@ -95,6 +95,8 @@ test('a link written without a scheme, or in capitals, still fails L4', () => {
     'folder: drive.google.com/drive/folders/0AbCdEfGhIjK',
     '(app-eu1.hubspot.com/contacts/12345678/record/0-1/987)',
     'https://DOCS.GOOGLE.COM/document/d/1AbCdEfGhIjK',
+    'https://VERCEL.COM/demo-team/demo-project',
+    'www.vercel.com/demo-team/demo-project',
   ]) {
     assert.deepEqual(layers(check(clean({ 'README.md': `${text}\n` }), opts())), ['L4'], text);
   }
@@ -106,6 +108,8 @@ test('look-alike hosts and public pages do not fail L4', () => {
     'https://docs.google.com.example.com/document/d/1AbCdEfGhIjK',
     'https://docs.google.com/',
     'https://www.hubspot.com/products/12345678',
+    'https://notvercel.com/demo-team/demo-project',
+    'https://vercel.com/docs/projects',
   ]) {
     assert.equal(check(clean({ 'README.md': `${text}\n` }), opts()).ok, true, text);
   }
