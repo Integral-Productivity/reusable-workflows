@@ -357,6 +357,17 @@ jobs:
             echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
+      # The later jobs run these same scripts, so the receipt's check version
+      # is the code that actually ran, even if scripts-ref moves meanwhile.
+      - name: Upload the scripts for the later jobs
+        if: steps.decide.outputs.action == 'publish' || steps.stale.outputs.stale != '[]'
+        uses: actions/upload-artifact@v7
+        with:
+          name: public-bundle-scripts
+          path: rw/scripts/public-bundle
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Upload the checked copy
         if: steps.decide.outputs.action == 'publish'
         uses: actions/upload-artifact@v7
@@ -406,13 +417,11 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Checkout public-bundle scripts
-        uses: actions/checkout@v6
+      - name: Download the scripts prepare ran
+        uses: actions/download-artifact@v8
         with:
-          repository: Integral-Productivity/reusable-workflows
-          ref: ${{ needs.prepare.outputs.check-version }}
-          path: rw
-          persist-credentials: false
+          name: public-bundle-scripts
+          path: rw/scripts/public-bundle
 
       - uses: actions/setup-node@v4
         with:
@@ -570,13 +579,11 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Checkout public-bundle scripts
-        uses: actions/checkout@v6
+      - name: Download the scripts prepare ran
+        uses: actions/download-artifact@v8
         with:
-          repository: Integral-Productivity/reusable-workflows
-          ref: ${{ needs.prepare.outputs.check-version }}
-          path: rw
-          persist-credentials: false
+          name: public-bundle-scripts
+          path: rw/scripts/public-bundle
 
       - uses: actions/setup-node@v4
         with:
