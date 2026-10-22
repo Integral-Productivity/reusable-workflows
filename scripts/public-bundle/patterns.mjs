@@ -60,11 +60,28 @@ const VERCEL_PUBLIC = new Set(['docs', 'blog', 'templates', 'guides', 'changelog
 
 export const LOCATOR_PATTERNS = [
   ['claude.ai connector ID in a tool name', () => /mcp__[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__/i],
-  ['Google Docs link', () => /\bdocs\.google\.com\/(?:document|spreadsheets|presentation|forms|drawings)\/d\//],
-  ['Google Drive link', () => /\bdrive\.google\.com\/./],
-  ['HubSpot portal or record link', () => /\bapp(?:-[a-z0-9]+)?\.hubspot\.com\/[\w-]+\/\d{5,}/],
   ['Supabase project URL', () => /\b[a-z0-9]{20}\.supabase\.co\b/],
 ];
+
+// Links to one Google file or one HubSpot record. Every host name in the line
+// is found first, with or without a scheme, and then compared exactly, so a
+// link written in prose is caught and a look-alike host is not.
+const HOST_AND_PATH = /(?<![\w.-])((?:[a-z0-9-]+\.)+[a-z]{2,})(\/[^\s"'`<>()\[\]{}]*)?/gi;
+const HOST_RULES = [
+  ['Google Docs link', (host, path) => host === 'docs.google.com' && /^\/(?:document|spreadsheets|presentation|forms|drawings)\/d\//.test(path)],
+  ['Google Drive link', (host, path) => host === 'drive.google.com' && path.length > 1],
+  ['HubSpot portal or record link', (host, path) => /^app(?:-[a-z0-9]+)?$/.test(host.split('.')[0]) && host.split('.').slice(1).join('.') === 'hubspot.com' && /^\/[\w-]+\/\d{5,}/.test(path)],
+];
+
+function hostLinks(line) {
+  const found = new Set();
+  for (const m of line.matchAll(HOST_AND_PATH)) {
+    const host = m[1].toLowerCase();
+    const path = m[2] ?? '';
+    for (const [name, rule] of HOST_RULES) if (rule(host, path)) found.add(name);
+  }
+  return [...found];
+}
 
 function vercelProject(line) {
   for (const m of line.matchAll(/vercel\.com\/([\w-]+)\/[\w-]+/g)) if (!VERCEL_PUBLIC.has(m[1].toLowerCase())) return true;
@@ -79,7 +96,7 @@ function homePath(line) {
 }
 
 export function locatorsIn(line) {
-  const found = LOCATOR_PATTERNS.filter(([, re]) => re().test(line)).map(([name]) => name);
+  const found = [...LOCATOR_PATTERNS.filter(([, re]) => re().test(line)).map(([name]) => name), ...hostLinks(line)];
   if (vercelProject(line)) found.push('Vercel project URL');
   if (homePath(line)) found.push('absolute path with a user name');
   return found;

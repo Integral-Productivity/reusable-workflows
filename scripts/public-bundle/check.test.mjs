@@ -89,6 +89,28 @@ test('other internal locators fail on L4', () => {
   }
 });
 
+test('a link written without a scheme, or in capitals, still fails L4', () => {
+  for (const text of [
+    'see docs.google.com/document/d/1AbCdEfGhIjK/edit',
+    'folder: drive.google.com/drive/folders/0AbCdEfGhIjK',
+    '(app-eu1.hubspot.com/contacts/12345678/record/0-1/987)',
+    'https://DOCS.GOOGLE.COM/document/d/1AbCdEfGhIjK',
+  ]) {
+    assert.deepEqual(layers(check(clean({ 'README.md': `${text}\n` }), opts())), ['L4'], text);
+  }
+});
+
+test('look-alike hosts and public pages do not fail L4', () => {
+  for (const text of [
+    'https://notdocs.google.com/document/d/1AbCdEfGhIjK',
+    'https://docs.google.com.example.com/document/d/1AbCdEfGhIjK',
+    'https://docs.google.com/',
+    'https://www.hubspot.com/products/12345678',
+  ]) {
+    assert.equal(check(clean({ 'README.md': `${text}\n` }), opts()).ok, true, text);
+  }
+});
+
 test('placeholder paths do not fail L4', () => {
   assert.equal(check(clean({ 'README.md': 'cp x /Users/<you>/y and ~/notes and /home/runner/work\n' }), opts()).ok, true);
 });
