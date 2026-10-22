@@ -130,6 +130,10 @@ env:
 jobs:
   prepare:
     name: Classify, build and check
+    # Runs only on events that people with write access to the caller trigger
+    # (a tag or branch push, a manual run). A pull request event never reaches
+    # the build: it would put code from the PR author next to the secrets.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -146,6 +150,18 @@ jobs:
       check-version: ${{ steps.scripts.outputs.sha }}
       stale: ${{ steps.stale.outputs.stale }}
     steps:
+      # A branch or tag of this repo only: a pull request ref or a commit SHA
+      # could name code from outside this repo's maintainers.
+      - name: Verify scripts-ref
+        env:
+          SCRIPTS_REF: ${{ inputs.scripts-ref }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$SCRIPTS_REF" =~ ^(main|v[0-9]+(\.[0-9]+){0,2})$ ]]; then
+            echo "::error::scripts-ref must be main or a release tag such as v1 or v1.5.0 (got '$SCRIPTS_REF')." >&2
+            exit 1
+          fi
+
       - name: Checkout source repo
         uses: actions/checkout@v6
         with:
@@ -372,7 +388,7 @@ jobs:
       - name: Read ip-releaser App PEM from 1Password
         id: pem
         if: ${{ !inputs.dry-run }}
-        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@cacdc8f4e0bad8d079da06688f6275c3a0ae7a85 # main 2026-10-22
         with:
           op-service-account-token: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
           item-path: op://ip-automation-public/ip-releaser/private_key
@@ -537,7 +553,7 @@ jobs:
       - name: Read ip-releaser App PEM from 1Password
         id: pem
         if: ${{ !inputs.dry-run }}
-        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@cacdc8f4e0bad8d079da06688f6275c3a0ae7a85 # main 2026-10-22
         with:
           op-service-account-token: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
           item-path: op://ip-automation-public/ip-releaser/private_key
