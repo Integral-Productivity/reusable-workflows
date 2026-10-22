@@ -1,0 +1,679 @@
+# Reusable public-bundle workflow: publish a public copy of a private plugin.
+#
+# On a release tag of a plugin classified `public`, this builds an allowlisted
+# copy of the release, runs the privacy check on it inside the PRIVATE source
+# repo's run, and only then opens a pull request that puts the copy into a
+# folder of a public catalog repo. Design: `marketplace` ADR 0002 and the
+# public plugin bundles plan (U4). The scripts it runs live in
+# scripts/public-bundle/ here; their headers hold the detailed rules.
+#
+# A thin caller in each plugin repo (template: template-claude-plugin
+# .github/workflows/publish-public.yml):
+#
+#   name: Publish public copy
+#   on:
+#     push:
+#       tags: ['v[0-9]+.[0-9]+.[0-9]+']
+#       branches: [main]
+#       paths: ['.github/plugin-distribution.yml']
+#     workflow_dispatch:
+#       inputs:
+#         tag: { description: 'Release tag, for example v1.2.0', required: true }
+#         dry-run: { type: boolean, default: true }
+#   permissions:
+#     contents: read
+#     issues: write
+#   concurrency:
+#     group: publish-public-${{ github.repository }}
+#     cancel-in-progress: false
+#   jobs:
+#     publish:
+#       uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-public-bundle.yml@v1
+#       with:
+#         tag: ${{ inputs.tag || '' }}
+#         dry-run: ${{ inputs.dry-run || false }}
+#       secrets:
+#         OP_RELEASER_PUBLIC_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+#         PUBLIC_BUNDLE_DENYLIST: ${{ secrets.PUBLIC_BUNDLE_DENYLIST }}
+#         PUBLIC_BUNDLE_DENYLIST_KEY: ${{ secrets.PUBLIC_BUNDLE_DENYLIST_KEY }}
+#
+# What one run does
+# -----------------
+#   prepare  (contents: read, no write token)
+#     Reads `.github/plugin-distribution.yml` at the tag and on the default
+#     branch (classification.mjs). For a public release: builds the copy
+#     (build.mjs), validates it with `claude plugin validate`, and runs the
+#     privacy check with gitleaks (check.mjs). Also looks in every public
+#     catalog for folders this repo published that should no longer be there
+#     (the plugin is now private, or moved to the other catalog).
+#   publish  (only when prepare passed) mints an ip-releaser token for the
+#     target catalog repo only, with contents and pull-request write only, and
+#     opens the pull request (publish.mjs regenerates marketplace.json). A
+#     plugin's first publish uses a `publish/` branch, which the catalog's
+#     Auto-Merge does not merge, so the owner reviews the first copy by hand
+#     (the plan's L7 review). A later version uses `claude/publish-<name>-v<x>`,
+#     which auto-merges; the job waits up to 30 minutes for the merge and, on a
+#     merge conflict, rebuilds the change on the new main and force-pushes its
+#     own branch, at most twice.
+#   remove   opens one removal pull request per catalog that still holds a
+#     folder from this repo that should be gone.
+#   report   opens or updates one issue in the source repo when the copy was
+#     held, or when any job failed. The issue names file, line, layer and a
+#     fixed detail per finding, never the matched text.
+#
+# A held copy never blocks the private release: this runs beside
+# promote-stable.yml, not before it (plan R11).
+#
+# Inputs
+# ------
+#   tag          Release tag for a manual run. A tag push uses its own tag; a
+#                push of the classification file runs with no tag and can only
+#                remove.
+#   dry-run      Build, check and apply to a local catalog checkout, print the
+#                planned diff, and push nothing. Needs no token.
+#   scripts-ref  The ref of this repo whose scripts/public-bundle/ the run
+#                uses. A called workflow cannot see its own ref, so keep this
+#                equal to the ref you call the workflow at (default: v1).
+#
+# Secrets (all declared required:false so a missing one fails at run time with
+# a message, not with a 0-second startup_failure)
+#   OP_RELEASER_PUBLIC_TOKEN    scoped 1Password token for the ip-releaser PEM
+#                               (ADR-064 / ADR-045). Not needed for a dry run.
+#   PUBLIC_BUNDLE_DENYLIST      hashed name denylist from denylist-build.mjs
+#   PUBLIC_BUNDLE_DENYLIST_KEY  the HMAC key it was built with
+# A missing denylist or key holds the copy (plan AE4); it never passes.
+#
+# Permissions the caller must grant: contents: read and issues: write (the
+# report job opens the issue with GITHUB_TOKEN). Every write to a catalog uses
+# the ip-releaser App token, never GITHUB_TOKEN.
+
+name: Reusable public bundle
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag for a manual run (vX.Y.Z). Ignored on a tag push.'
+        type: string
+        required: false
+        default: ''
+      dry-run:
+        description: 'Build, check and show the planned catalog diff; push nothing.'
+        type: boolean
+        required: false
+        default: false
+      scripts-ref:
+        description: 'Ref of Integral-Productivity/reusable-workflows whose scripts/public-bundle/ to run. Keep equal to the ref this workflow is called at.'
+        type: string
+        required: false
+        default: v1
+    secrets:
+      OP_RELEASER_PUBLIC_TOKEN:
+        description: 'Scoped 1Password token, read-only on the vault that holds only the ip-releaser PEM (ADR-064 / ADR-045).'
+        required: false
+      PUBLIC_BUNDLE_DENYLIST:
+        description: 'Hashed name denylist JSON from scripts/public-bundle/denylist-build.mjs.'
+        required: false
+      PUBLIC_BUNDLE_DENYLIST_KEY:
+        description: 'HMAC key the denylist was built with.'
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CATALOG_OWNER: Integral-Productivity
+  # catalog value in plugin-distribution.yml -> public catalog repo
+  CATALOG_CORE: marketplace
+  CATALOG_LABS: marketplace-labs-public
+
+jobs:
+  prepare:
+    name: Classify, build and check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      action: ${{ steps.decide.outputs.action }}
+      reason: ${{ steps.decide.outputs.reason }}
+      findings: ${{ steps.decide.outputs.findings }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      name: ${{ steps.decide.outputs.name }}
+      version: ${{ steps.decide.outputs.version }}
+      catalog-repo: ${{ steps.classify.outputs.catalog-repo }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      tag-time: ${{ steps.resolve.outputs.tag-time }}
+      check-version: ${{ steps.scripts.outputs.sha }}
+      stale: ${{ steps.stale.outputs.stale }}
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v6
+        with:
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout public-bundle scripts
+        uses: actions/checkout@v6
+        with:
+          repository: Integral-Productivity/reusable-workflows
+          ref: ${{ inputs.scripts-ref }}
+          path: rw
+          persist-credentials: false
+
+      - name: Record script version
+        id: scripts
+        run: echo "sha=$(git -C rw rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Resolve tag and default branch
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tag="$GITHUB_REF_NAME"; else tag="$INPUT_TAG"; fi
+          if [ -n "$tag" ] && ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$tag' is not a release tag of the form vX.Y.Z." >&2
+            exit 1
+          fi
+          head="origin/${DEFAULT_BRANCH}"
+          git -C source rev-parse --verify --quiet "$head" > /dev/null || { echo "::error::$head not found." >&2; exit 1; }
+          {
+            echo "tag=$tag"
+            echo "head=$head"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$tag" ]; then
+            commit="$(git -C source rev-parse --verify --quiet "refs/tags/${tag}^{commit}")" || { echo "::error::Tag $tag not found." >&2; exit 1; }
+            tag_time="$(git -C source for-each-ref --format='%(creatordate:iso-strict)' "refs/tags/${tag}")"
+            echo "commit=$commit" >> "$GITHUB_OUTPUT"
+            echo "tag-time=$tag_time" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read classification at the tag and on the default branch
+        id: classify
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          HEAD_REF: ${{ steps.resolve.outputs.head }}
+        run: |
+          set -euo pipefail
+          node rw/scripts/public-bundle/classification.mjs --repo source --tag "${TAG:-$HEAD_REF}" --head "$HEAD_REF" > "$RUNNER_TEMP/classification.json"
+          c="$(jq -r .classification "$RUNNER_TEMP/classification.json")"
+          catalog="$(jq -r '.catalog // ""' "$RUNNER_TEMP/classification.json")"
+          case "$catalog" in
+            core) repo="$CATALOG_CORE" ;;
+            labs) repo="$CATALOG_LABS" ;;
+            *) repo="" ;;
+          esac
+          echo "Classification: $c ($(jq -r .reason "$RUNNER_TEMP/classification.json")), catalog: ${catalog:-none}"
+          {
+            echo "classification=$c"
+            echo "reason=$(jq -r .reason "$RUNNER_TEMP/classification.json")"
+            echo "catalog-repo=$repo"
+            echo "include=$(jq -c '.include // []' "$RUNNER_TEMP/classification.json")"
+          } >> "$GITHUB_OUTPUT"
+
+      # Folders this repo published that should not stay: every folder when the
+      # plugin is not public, and folders in a catalog other than the target.
+      # The catalogs are public, so a clone needs no token.
+      - name: Find folders to remove from public catalogs
+        id: stale
+        env:
+          CLASSIFICATION: ${{ steps.classify.outputs.classification }}
+          TARGET: ${{ steps.classify.outputs.catalog-repo }}
+        run: |
+          set -euo pipefail
+          stale='[]'
+          for repo in "$CATALOG_CORE" "$CATALOG_LABS"; do
+            if [ "$CLASSIFICATION" = public ] && [ "$repo" = "$TARGET" ]; then continue; fi
+            dir="$RUNNER_TEMP/catalog-$repo"
+            git clone --quiet --depth 1 "https://github.com/${CATALOG_OWNER}/${repo}.git" "$dir"
+            folders="$(node rw/scripts/public-bundle/publish.mjs find --catalog "$dir" --source-repo "$GITHUB_REPOSITORY" | jq -c .folders)"
+            if [ "$folders" != '[]' ]; then
+              stale="$(jq -c --arg repo "$repo" --argjson folders "$folders" '. + [{repo: $repo, folders: $folders}]' <<< "$stale")"
+            fi
+          done
+          echo "To remove: $stale"
+          echo "stale=$stale" >> "$GITHUB_OUTPUT"
+
+      - name: Build the public copy
+        id: build
+        if: steps.classify.outputs.classification == 'public' && steps.resolve.outputs.tag != ''
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          INCLUDE: ${{ steps.classify.outputs.include }}
+        run: |
+          set -euo pipefail
+          status=0
+          node rw/scripts/public-bundle/build.mjs --repo source --ref "$TAG" --out bundle --include-json "$INCLUDE" > "$RUNNER_TEMP/build.json" || status=$?
+          if [ "$status" -gt 1 ]; then echo "::error::build.mjs exited $status." >&2; exit 1; fi
+          cat "$RUNNER_TEMP/build.json"
+          echo "ok=$(jq -r .ok "$RUNNER_TEMP/build.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Validate the copy with the plugin schema
+        id: validate
+        if: steps.build.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          npm install --silent -g @anthropic-ai/claude-code
+          if claude plugin validate bundle/.claude-plugin/plugin.json > "$RUNNER_TEMP/validate.txt" 2>&1; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/validate.txt"
+
+      # Installed from the upstream release tarball, pinned by version and
+      # SHA-256, for the same reason ci.yml installs actionlint this way: this
+      # repo's Actions allowlist does not cover the gitleaks action.
+      - name: Install gitleaks
+        if: steps.validate.outputs.ok == 'true'
+        env:
+          GITLEAKS_VERSION: 8.28.0
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --output "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/${tarball}" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+
+      # check.mjs prints file, line, layer and a fixed detail per finding, never
+      # the matched text, and keeps gitleaks' own output out of the log.
+      - name: Privacy check
+        id: check
+        if: steps.validate.outputs.ok == 'true'
+        env:
+          PUBLIC_BUNDLE_DENYLIST: ${{ secrets.PUBLIC_BUNDLE_DENYLIST }}
+          PUBLIC_BUNDLE_DENYLIST_KEY: ${{ secrets.PUBLIC_BUNDLE_DENYLIST_KEY }}
+        run: |
+          set -euo pipefail
+          status=0
+          node rw/scripts/public-bundle/check.mjs bundle --gitleaks "$RUNNER_TEMP/gitleaks" > "$RUNNER_TEMP/check.txt" || status=$?
+          if [ "$status" -gt 1 ]; then echo "::error::check.mjs exited $status." >&2; exit 1; fi
+          cat "$RUNNER_TEMP/check.txt"
+          if [ "$status" -eq 0 ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Decide
+        id: decide
+        env:
+          CLASSIFICATION: ${{ steps.classify.outputs.classification }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          BUILD_OK: ${{ steps.build.outputs.ok }}
+          VALIDATE_OK: ${{ steps.validate.outputs.ok }}
+          CHECK_OK: ${{ steps.check.outputs.ok }}
+        run: |
+          set -euo pipefail
+          findings=""
+          if [ "$CLASSIFICATION" != public ] || [ -z "$TAG" ]; then
+            action=none; reason="not publishing: $(jq -r .reason "$RUNNER_TEMP/classification.json")${TAG:+, tag $TAG}"
+          elif [ "$BUILD_OK" != true ]; then
+            action=held; reason="build failed: $(jq -r '.reason + (if .detail then " (" + .detail + ")" else "" end)' "$RUNNER_TEMP/build.json")"
+          elif [ "$VALIDATE_OK" != true ]; then
+            action=held; reason="claude plugin validate failed"; findings="$(head -c 4000 "$RUNNER_TEMP/validate.txt")"
+          elif [ "$CHECK_OK" != true ]; then
+            action=held; reason="privacy check: $(tail -n 1 "$RUNNER_TEMP/check.txt")"; findings="$(head -n 200 "$RUNNER_TEMP/check.txt")"
+          else
+            action=publish; reason="passed"
+          fi
+          name=""; version=""
+          if [ -f bundle/.claude-plugin/plugin.json ]; then
+            name="$(jq -r '.name // ""' bundle/.claude-plugin/plugin.json)"
+            version="$(jq -r '.version // ""' bundle/.claude-plugin/plugin.json)"
+          fi
+          if [ "$action" = publish ] && [ "v$version" != "$TAG" ]; then
+            action=held; reason="tag $TAG does not match plugin.json version $version"
+          fi
+          echo "Decision: $action ($reason)"
+          delim="FINDINGS_$(openssl rand -hex 8)"
+          {
+            echo "action=$action"
+            echo "reason=$reason"
+            echo "name=$name"
+            echo "version=$version"
+            echo "findings<<$delim"
+            echo "$findings"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload the checked copy
+        if: steps.decide.outputs.action == 'publish'
+        uses: actions/upload-artifact@v7
+        with:
+          name: public-bundle
+          path: bundle
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Open catalog pull request
+    needs: prepare
+    if: needs.prepare.outputs.action == 'publish'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify release credentials are configured
+        if: ${{ !inputs.dry-run }}
+        env:
+          CLIENT_ID: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+          OP_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLIENT_ID:-}" ]; then echo "::error::vars.IP_RELEASER_APP_CLIENT_ID is not set (org variable, visibility ALL)." >&2; exit 1; fi
+          if [ -z "${OP_TOKEN:-}" ]; then echo "::error::secrets.OP_RELEASER_PUBLIC_TOKEN is empty. The caller must forward it." >&2; exit 1; fi
+
+      - name: Read ip-releaser App PEM from 1Password
+        id: pem
+        if: ${{ !inputs.dry-run }}
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        with:
+          op-service-account-token: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+          item-path: op://ip-automation-public/ip-releaser/private_key
+
+      # Scoped to the one catalog repo, contents and pull requests only (KTD13).
+      - name: Generate ip-releaser token for the catalog repo
+        id: app-token
+        if: ${{ !inputs.dry-run }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+          owner: ${{ env.CATALOG_OWNER }}
+          repositories: ${{ needs.prepare.outputs.catalog-repo }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout public-bundle scripts
+        uses: actions/checkout@v6
+        with:
+          repository: Integral-Productivity/reusable-workflows
+          ref: ${{ needs.prepare.outputs.check-version }}
+          path: rw
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Download the checked copy
+        uses: actions/download-artifact@v8
+        with:
+          name: public-bundle
+          path: bundle
+
+      - name: Checkout the catalog
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.CATALOG_OWNER }}/${{ needs.prepare.outputs.catalog-repo }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          path: catalog
+          fetch-depth: 0
+
+      - name: Apply, push and wait for the merge
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          NAME: ${{ needs.prepare.outputs.name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+          TAG_TIME: ${{ needs.prepare.outputs.tag-time }}
+          CHECK_VERSION: ${{ needs.prepare.outputs.check-version }}
+          CATALOG_REPO: ${{ env.CATALOG_OWNER }}/${{ needs.prepare.outputs.catalog-repo }}
+        run: |
+          set -euo pipefail
+          publish="$GITHUB_WORKSPACE/rw/scripts/public-bundle/publish.mjs"
+          cd catalog
+          # actions/checkout leaves the default branch checked out.
+          base="$(git rev-parse --abbrev-ref HEAD)"
+
+          apply() {
+            node "$publish" apply --catalog . --copy "$GITHUB_WORKSPACE/bundle" \
+              --source-repo "$GITHUB_REPOSITORY" --tag "$TAG" --commit "$COMMIT" \
+              --tag-time "$TAG_TIME" --check-version "$CHECK_VERSION" > "$RUNNER_TEMP/apply.json" || true
+            cat "$RUNNER_TEMP/apply.json"
+            [ "$(jq -r .ok "$RUNNER_TEMP/apply.json")" = true ] || { echo "::error::publish.mjs: $(jq -r '.reason + " " + (.detail // "")' "$RUNNER_TEMP/apply.json")" >&2; exit 1; }
+            git add -A
+          }
+
+          apply
+          first="$(jq -r .firstPublish "$RUNNER_TEMP/apply.json")"
+          if git diff --cached --quiet; then
+            echo "::notice::The catalog already holds $NAME $VERSION with this content. Nothing to publish."
+            exit 0
+          fi
+          {
+            echo "### Planned catalog change for $NAME $VERSION"
+            echo '```'
+            git diff --cached --stat
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DRY_RUN" = true ]; then
+            git diff --cached --name-only
+            echo "::notice::Dry run: nothing pushed."
+            exit 0
+          fi
+
+          bot_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          # A first publish waits for the owner: Auto-Merge only merges claude/*.
+          if [ "$first" = true ]; then branch="publish/${NAME}-v${VERSION}"; else branch="claude/publish-${NAME}-v${VERSION}"; fi
+          title="feat(${NAME}): publish v${VERSION}"
+
+          commit_and_push() {
+            git switch --quiet -C "$branch"
+            git commit --quiet -m "$title" -m "Public copy of ${GITHUB_REPOSITORY} ${TAG} (${COMMIT}), checked by reusable-workflows ${CHECK_VERSION}."
+            git push --quiet --force origin "$branch"
+          }
+          commit_and_push
+
+          pr="$(gh pr list --repo "$CATALOG_REPO" --head "$branch" --state open --json url --jq '.[0].url // ""')"
+          if [ -z "$pr" ]; then
+            {
+              echo "Publishes the public copy of \`${GITHUB_REPOSITORY}\` ${TAG}."
+              echo
+              echo "- Source commit: \`${COMMIT}\`"
+              echo "- Privacy check: passed (reusable-workflows \`${CHECK_VERSION}\`)"
+              echo "- Receipt: \`plugins/${NAME}/.publish-receipt.json\`"
+              echo
+              if [ "$first" = true ]; then
+                echo "**First publish of this plugin.** This branch does not auto-merge. Review every file before you merge: once merged, the content stays in this public repo's history."
+              else
+                echo "Opened by the publish workflow. Auto-Merge merges it when the required checks pass."
+              fi
+            } > "$RUNNER_TEMP/body.md"
+            pr="$(gh pr create --repo "$CATALOG_REPO" --base "$base" --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md")"
+          fi
+          echo "Pull request: $pr"
+          echo "Pull request: $pr" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$first" = true ]; then
+            echo "::notice::First publish of $NAME. $pr waits for the owner's review."
+            exit 0
+          fi
+
+          retries=0
+          deadline=$(( $(date +%s) + 1800 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            sleep 30
+            read -r state mergeable < <(gh pr view "$pr" --repo "$CATALOG_REPO" --json state,mergeable --jq '"\(.state) \(.mergeable)"')
+            case "$state" in
+              MERGED) echo "Merged: $pr"; exit 0 ;;
+              CLOSED) echo "::error::$pr was closed without a merge." >&2; exit 1 ;;
+            esac
+            if [ "$mergeable" = CONFLICTING ]; then
+              if [ "$retries" -ge 2 ]; then echo "::error::$pr still conflicts after 2 rebuilds." >&2; exit 1; fi
+              retries=$((retries + 1))
+              echo "Conflict: rebuilding on the new $base (attempt $retries of 2)."
+              git fetch --quiet origin "$base"
+              git switch --quiet -C "$branch" "origin/$base"
+              apply
+              commit_and_push
+            fi
+          done
+          echo "::error::$pr did not merge within 30 minutes." >&2
+          exit 1
+
+  remove:
+    name: Remove from ${{ matrix.target.repo }}
+    needs: prepare
+    if: needs.prepare.outputs.stale != '' && needs.prepare.outputs.stale != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.prepare.outputs.stale) }}
+    steps:
+      - name: Read ip-releaser App PEM from 1Password
+        id: pem
+        if: ${{ !inputs.dry-run }}
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@main
+        with:
+          op-service-account-token: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+          item-path: op://ip-automation-public/ip-releaser/private_key
+
+      - name: Generate ip-releaser token for the catalog repo
+        id: app-token
+        if: ${{ !inputs.dry-run }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+          owner: ${{ env.CATALOG_OWNER }}
+          repositories: ${{ matrix.target.repo }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout public-bundle scripts
+        uses: actions/checkout@v6
+        with:
+          repository: Integral-Productivity/reusable-workflows
+          ref: ${{ needs.prepare.outputs.check-version }}
+          path: rw
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Checkout the catalog
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.CATALOG_OWNER }}/${{ matrix.target.repo }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          path: catalog
+
+      - name: Remove folders and open the pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          FOLDERS: ${{ toJSON(matrix.target.folders) }}
+          CATALOG_REPO: ${{ env.CATALOG_OWNER }}/${{ matrix.target.repo }}
+          REASON: ${{ needs.prepare.outputs.reason }}
+        run: |
+          set -euo pipefail
+          publish="$GITHUB_WORKSPACE/rw/scripts/public-bundle/publish.mjs"
+          cd catalog
+          # actions/checkout leaves the default branch checked out.
+          base="$(git rev-parse --abbrev-ref HEAD)"
+          for name in $(jq -r '.[]' <<< "$FOLDERS"); do
+            node "$publish" remove --catalog . --name "$name"
+          done
+          git add -A
+          if git diff --cached --quiet; then echo "Nothing to remove."; exit 0; fi
+          git diff --cached --stat
+          if [ "$DRY_RUN" = true ]; then echo "::notice::Dry run: nothing pushed."; exit 0; fi
+          bot_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          branch="claude/unpublish-${GITHUB_REPOSITORY#*/}"
+          title="chore: remove $(jq -r 'join(", ")' <<< "$FOLDERS")"
+          git switch --quiet -C "$branch"
+          git commit --quiet -m "$title" -m "${GITHUB_REPOSITORY} no longer publishes here (${REASON})."
+          git push --quiet --force origin "$branch"
+          pr="$(gh pr list --repo "$CATALOG_REPO" --head "$branch" --state open --json url --jq '.[0].url // ""')"
+          if [ -z "$pr" ]; then
+            echo "Removes the public copy of \`${GITHUB_REPOSITORY}\` from this catalog: the plugin is no longer published here." > "$RUNNER_TEMP/body.md"
+            pr="$(gh pr create --repo "$CATALOG_REPO" --base "$base" --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md")"
+          fi
+          echo "Pull request: $pr" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: Report a held copy
+    needs: [prepare, publish, remove]
+    if: >-
+      always() && (
+        needs.prepare.result == 'failure' ||
+        needs.prepare.outputs.action == 'held' ||
+        needs.publish.result == 'failure' ||
+        needs.remove.result == 'failure'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue in the source repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          ACTION: ${{ needs.prepare.outputs.action }}
+          REASON: ${{ needs.prepare.outputs.reason }}
+          FINDINGS: ${{ needs.prepare.outputs.findings }}
+          PREPARE: ${{ needs.prepare.result }}
+          PUBLISH: ${{ needs.publish.result }}
+          REMOVE: ${{ needs.remove.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$PREPARE" = failure ]; then
+            what="The build or check could not run, so the copy was held (a check that cannot run counts as a failure)."
+          elif [ "$ACTION" = held ]; then
+            what="The public copy was held: ${REASON}."
+          elif [ "$PUBLISH" = failure ]; then
+            what="The copy passed the check, but the catalog pull request did not merge (see the run)."
+          else
+            what="Removing an earlier public copy from a catalog failed (see the run)."
+          fi
+          title="Public copy held: ${TAG:-classification change}"
+          {
+            echo "$what"
+            echo
+            if [ -n "$FINDINGS" ]; then
+              echo "Findings (file:line, layer, detail; matched text is never shown):"
+              echo
+              echo '```'
+              echo "$FINDINGS"
+              echo '```'
+              echo
+            fi
+            echo "The public catalog still holds the last clean version. The private release and \`stable\` are not affected."
+            echo
+            echo "If a finding is a secret (L1) or a Client name (L3) and this repo is already public, rotate the secret or clean the source too: holding the copy does not hide what the source already shows."
+            echo
+            echo "Run: $RUN_URL"
+          } > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md"
+          if [ "$DRY_RUN" = true ]; then
+            cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Dry run: no issue opened."
+            exit 0
+          fi
+          existing="$(gh issue list --state open --search "in:title \"$title\"" --json number,title | jq -r --arg t "$title" '[.[] | select(.title == $t)][0].number // ""')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi
