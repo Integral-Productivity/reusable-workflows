@@ -60,9 +60,9 @@ const VERCEL_PUBLIC = new Set(['docs', 'blog', 'templates', 'guides', 'changelog
 
 export const LOCATOR_PATTERNS = [
   ['claude.ai connector ID in a tool name', () => /mcp__[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}__/i],
-  ['Google Docs link', () => /docs\.google\.com\/(?:document|spreadsheets|presentation|forms|drawings)\/d\//],
-  ['Google Drive link', () => /drive\.google\.com\/./],
-  ['HubSpot portal or record link', () => /app(?:-[a-z0-9]+)?\.hubspot\.com\/[\w-]+\/\d{5,}/],
+  ['Google Docs link', () => /\bdocs\.google\.com\/(?:document|spreadsheets|presentation|forms|drawings)\/d\//],
+  ['Google Drive link', () => /\bdrive\.google\.com\/./],
+  ['HubSpot portal or record link', () => /\bapp(?:-[a-z0-9]+)?\.hubspot\.com\/[\w-]+\/\d{5,}/],
   ['Supabase project URL', () => /\b[a-z0-9]{20}\.supabase\.co\b/],
 ];
 
