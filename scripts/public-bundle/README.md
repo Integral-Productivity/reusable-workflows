@@ -1,6 +1,6 @@
 # public-bundle
 
-Scripts behind the planned `reusable-public-bundle.yml` workflow: copy a plugin
+Scripts behind the `reusable-public-bundle.yml` workflow: copy a plugin
 release classified `public` into a public catalog (`marketplace` or
 `marketplace-labs-public`) as a folder, after a privacy check.
 Design: `marketplace` ADR 0002 (public plugin copies live in catalog folders).
@@ -11,7 +11,8 @@ Design: `marketplace` ADR 0002 (public plugin copies live in catalog folders).
 | `build.mjs` | done | Build the allowlisted copy from `git archive`; fail closed on a symlink, a missing licence, a broken `${CLAUDE_PLUGIN_ROOT}` reference or an upload limit |
 | `check.mjs`, `patterns.mjs` | done | Privacy check over the copy (L1 secrets, L2 email and phone, L3 hashed name denylist, L4 internal locators, L5 confidential markers); fail closed |
 | `denylist-build.mjs` | done | Operator-only: turn a name list into the hashed denylist secret |
-| `publish.mjs`, `catalog.mjs` | planned | Open the catalog PR; regenerate `marketplace.json` |
+| `catalog.mjs` | done | Regenerate a catalog's `marketplace.json` from its `plugins/<name>/` folders, keeping entries with other sources |
+| `publish.mjs` | done | Put a checked copy into a catalog checkout with its receipt, take one out, or find the folders a source repo published |
 
 ## The classification file
 
@@ -50,3 +51,22 @@ at least monthly, on the operator's machine only:
 ```bash
 PUBLIC_BUNDLE_DENYLIST_KEY=... node denylist-build.mjs < names.txt
 ```
+
+## The publish workflow
+
+`.github/workflows/reusable-public-bundle.yml` runs these scripts in order. A
+plugin repo calls it from a thin caller; the workflow header holds the caller
+and the rules for each job.
+
+- A copy is built and checked inside the private repo's run. Only a copy that
+  passed is pushed, because a branch in a public repo is public once pushed.
+- A plugin's first publish opens a `publish/<name>-v<version>` pull request,
+  which does not auto-merge: the owner reviews the first copy by hand. A later
+  version uses `claude/publish-<name>-v<version>` and auto-merges.
+- Each folder carries `.publish-receipt.json`: source repo, version, source
+  commit, tag time, check version, check result and a SHA-256 digest of the
+  folder. The catalog integrity check reads it.
+- A held copy opens or updates one issue in the source repo, titled
+  `Public copy held: <tag>`.
+- Run it by hand with `dry-run: true` to see the planned catalog diff without
+  pushing anything.
