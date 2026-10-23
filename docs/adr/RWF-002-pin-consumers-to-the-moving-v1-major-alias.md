@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted — 2026-07-20 (backfilled as an ADR 2026-08-06)
+Accepted — 2026-07-20 (backfilled as an ADR 2026-08-06). Release clause amended
+by [RWF-006](RWF-006-release-on-every-merge-to-main.md) on 2026-10-23: releases
+are now published on every merge, not by hand.
 
 Implements the org-wide convention decided in devops-excellence
 [**ADR-046**](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-046-semver-tags-for-reusables.md)

@@ -2,14 +2,13 @@
 
 ## Status
 
-Proposed — 2026-10-23. Amends the release clause of
+Accepted — 2026-10-23. Amends the release clause of
 [RWF-002](RWF-002-pin-consumers-to-the-moving-v1-major-alias.md) ("Release is
 human-triggered; alias movement is automated"). The `@v1` pin, and the rest of
 RWF-002, stay as they are.
 
-Becomes Accepted when the owner picks "Release on every merge" on the decision
-card in the public plugin bundles thread. If the owner picks the release-PR
-option instead, this record is superseded before it merges.
+The owner chose "Release on every merge" over a release PR (release-please) on
+2026-10-23.
 
 ## Context
 
