@@ -1,0 +1,108 @@
+# Releases this repo on every merge to main, so nobody publishes a release by
+# hand (RWF-006).
+#
+# scripts/next-release.mjs reads the Conventional Commits since the last
+# vX.Y.Z tag and picks the version: feat -> minor, a breaking change -> major,
+# anything else that changes a non-Markdown file -> patch, Markdown only -> no
+# release. This job then publishes the GitHub Release with an ip-releaser App
+# token. It must be an App token: a release made with GITHUB_TOKEN starts no
+# other workflow, and major-tag-mover.yml, which moves `v1`, runs on
+# `release: published`.
+#
+# The merge is the gate. Every PR here passes CI and the owner's review before
+# it merges, and every caller pinned to @v1 gets the change within minutes.
+# A breaking change makes v2.0.0, which no @v1 caller receives.
+#
+# Secrets: OP_RELEASER_PUBLIC_TOKEN, the 1Password token scoped to the
+# ip-automation-public vault, which holds only the ip-releaser PEM (ADR-064 /
+# ADR-045). Variables: IP_RELEASER_APP_CLIENT_ID (org).
+
+name: Release on merge
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One release at a time. A queued run sees the tag the previous run made.
+concurrency:
+  group: release-on-merge
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout with tags
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Same suites as ci.yml, on the merged commit, so a release never ships
+      # a commit whose tests fail.
+      - name: Run the script tests
+        run: |
+          node --test scripts/check-upload-limits.test.mjs scripts/next-release.test.mjs
+          node --test 'scripts/public-bundle/*.test.mjs'
+
+      - name: Decide the next version
+        id: next
+        run: |
+          set -euo pipefail
+          r="$(node scripts/next-release.mjs --ref "$GITHUB_SHA")"
+          echo "$r"
+          {
+            echo "release=$(jq -r .release <<< "$r")"
+            echo "version=$(jq -r .version <<< "$r")"
+            echo "bump=$(jq -r .bump <<< "$r")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read ip-releaser App PEM from 1Password
+        id: pem
+        if: steps.next.outputs.release == 'true'
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@cacdc8f4e0bad8d079da06688f6275c3a0ae7a85 # main 2026-10-22
+        with:
+          op-service-account-token: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+          item-path: op://ip-automation-public/ip-releaser/private_key
+
+      - name: Generate ip-releaser token for this repo
+        id: app-token
+        if: steps.next.outputs.release == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Publish the release
+        if: steps.next.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ steps.next.outputs.version }}
+          BUMP: ${{ steps.next.outputs.bump }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::notice::$VERSION already exists; nothing to do."
+            exit 0
+          fi
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$VERSION" --generate-notes
+          echo "Released $VERSION ($BUMP) at $GITHUB_SHA. major-tag-mover.yml moves the major tag next." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Report no release
+        if: steps.next.outputs.release != 'true'
+        run: echo "Only Markdown changed since ${{ steps.next.outputs.version }}; no release." | tee -a "$GITHUB_STEP_SUMMARY"

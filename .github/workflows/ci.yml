@@ -93,6 +93,10 @@ jobs:
       - name: Test check-upload-limits.mjs
         run: node --test scripts/check-upload-limits.test.mjs
 
+      # The version rule release-on-merge.yml uses (RWF-006).
+      - name: Test next-release.mjs
+        run: node --test scripts/next-release.test.mjs
+
       # The public-bundle scripts (classification reader first; builder and
       # privacy check follow). node:test, no dependencies. A glob, because
       # Node 22 treats a bare directory argument as a file to run.

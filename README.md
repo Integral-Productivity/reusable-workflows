@@ -64,6 +64,12 @@ What follows is the operational summary.
 | `@v1.2.3` | Immutable exact release. | Reproducibility-critical callers that want to bump deliberately. |
 | `@<full-sha>` | Immutable commit; ignores all tag movement. | Supply-chain-hardened callers. |
 
+**Releases happen on every merge to `main`.** `release-on-merge.yml` picks the
+next version from the Conventional Commits (feat: minor, breaking: major, other
+code: patch, Markdown only: none) and publishes the Release; `major-tag-mover.yml`
+then moves `v1`. Nobody publishes a release by hand. See
+[**RWF-006**](docs/adr/RWF-006-release-on-every-merge-to-main.md).
+
 Avoid `@main` in new callers. Moving major tags are mutable refs — an inherent
 `@vN` supply-chain consideration; callers needing immutability pin `@v1.2.3` or a
 SHA per the table above.
@@ -75,14 +81,19 @@ automatically.
 
 ### Release process
 
-1. Publish a **GitHub Release** tagged `vX.Y.Z` (immutable) from `main`.
+1. [`release-on-merge.yml`](.github/workflows/release-on-merge.yml) runs on
+   every push to `main`. It computes the next `vX.Y.Z` from the Conventional
+   Commits since the last tag (`scripts/next-release.mjs`) and publishes the
+   GitHub Release with an `ip-releaser` App token. A merge that changes only
+   Markdown makes no release ([RWF-006](docs/adr/RWF-006-release-on-every-merge-to-main.md)).
 2. [`major-tag-mover.yml`](.github/workflows/major-tag-mover.yml) fires on
    `release: published` and fast-forwards the moving major (`vX`) to that commit
    — using `git` + `GITHUB_TOKEN` only, no marketplace action
    ([ADR-012](https://github.com/Integral-Productivity/devops-excellence/blob/main/docs/adr/ADR-012-actions-allow-list-policy.md)).
 
-The human chooses **when** to cut a release; moving the major alias (the
-drift-prone step) is automated.
+No step is manual. The merge is the release gate, so the PR title (the squash
+commit subject) decides the bump: `feat:` is minor, `type!:` or a
+`BREAKING CHANGE:` footer is major, anything else is patch.
 
 ## Architecture decisions
 
