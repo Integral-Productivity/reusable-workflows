@@ -13,6 +13,7 @@ Design: `marketplace` ADR 0002 (public plugin copies live in catalog folders).
 | `denylist-build.mjs` | done | Operator-only: turn a name list into the hashed denylist secret |
 | `catalog.mjs` | done | Regenerate a catalog's `marketplace.json` from its `plugins/<name>/` folders, keeping entries with other sources |
 | `publish.mjs` | done | Put a checked copy into a catalog checkout with its receipt, take one out, or find the folders a source repo published |
+| `integrity.mjs` | done | Audit a public catalog: every folder has a passing receipt for its version, its digest matches, and `marketplace.json` matches the folders; other sources only warn. Weekly, list folders whose source is no longer public for this catalog |
 
 ## The classification file
 
@@ -70,3 +71,11 @@ and the rules for each job.
   `Public copy held: <tag>`.
 - Run it by hand with `dry-run: true` to see the planned catalog diff without
   pushing anything.
+
+## The catalog integrity workflow
+
+`.github/workflows/reusable-catalog-integrity.yml` runs `integrity.mjs` in each
+public catalog on every pull request, every push to `main` and weekly. The weekly
+run also opens a removal pull request for reclassified plugins. A source repo it
+cannot read is never removed; the run fails instead. The workflow header holds the
+caller.

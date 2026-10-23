@@ -1,0 +1,233 @@
+# Reusable catalog integrity check for a public plugin catalog.
+#
+# Proves that every `./plugins/<name>` folder in the catalog carries a passing
+# receipt from the publish workflow, that no file changed after the check, and
+# that marketplace.json lists exactly the folders. Weekly, it also removes
+# folders whose source repo is no longer classified public for this catalog.
+# Design: `marketplace` ADR 0002 and the public plugin bundles plan (U5). The
+# rules are in scripts/public-bundle/integrity.mjs.
+#
+# Entries with another source (the `github` entries in marketplace-labs-public)
+# have no receipt. They only warn, and never fail the check.
+#
+# A thin caller in each public catalog repo:
+#
+#   name: Catalog integrity
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#     schedule:
+#       - cron: '17 6 * * 1'
+#     workflow_dispatch:
+#   permissions:
+#     contents: read
+#   jobs:
+#     integrity:
+#       uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-catalog-integrity.yml@v1
+#       with:
+#         catalog: labs        # or core
+#       secrets:
+#         OP_RELEASER_PUBLIC_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+#
+# Jobs
+# ----
+#   audit        every event. Read only. Fails on any error from integrity.mjs
+#                and writes the errors and warnings to the step summary. Make
+#                its check, "Catalog integrity", required on main.
+#   reclassify   schedule and manual runs only. Reads each source repo's
+#                classification with a read-only ip-releaser token for the org,
+#                and opens one removal pull request on branch
+#                `claude/unpublish-reclassified`, which the catalog's
+#                Auto-Merge merges. A source it cannot read is never removed:
+#                the job fails instead, so a lost token cannot empty a catalog.
+#
+# The scripts come from this repo's `v1` tag, written as a literal so that no
+# caller and no pull request can choose which code runs next to the secret.
+#
+# Secrets (required: false, so a missing one fails at run time with a message)
+#   OP_RELEASER_PUBLIC_TOKEN  scoped 1Password token for the ip-releaser PEM.
+#                             Only the reclassify job uses it.
+
+name: Reusable catalog integrity
+
+on:
+  workflow_call:
+    inputs:
+      catalog:
+        description: 'Which public catalog this is: core (marketplace) or labs (marketplace-labs-public).'
+        type: string
+        required: true
+    secrets:
+      OP_RELEASER_PUBLIC_TOKEN:
+        description: 'Scoped 1Password token, read-only on the vault that holds only the ip-releaser PEM.'
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CATALOG_OWNER: Integral-Productivity
+
+jobs:
+  audit:
+    name: Catalog integrity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the catalog input
+        env:
+          CATALOG: ${{ inputs.catalog }}
+        run: |
+          case "$CATALOG" in
+            core|labs) ;;
+            *) echo "::error::catalog must be core or labs, not '$CATALOG'." >&2; exit 1 ;;
+          esac
+
+      - name: Checkout the catalog
+        uses: actions/checkout@v6
+        with:
+          path: catalog
+          persist-credentials: false
+
+      - name: Checkout public-bundle scripts
+        uses: actions/checkout@v6
+        with:
+          repository: Integral-Productivity/reusable-workflows
+          ref: v1
+          path: rw
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Audit the catalog
+        run: |
+          set -uo pipefail
+          node rw/scripts/public-bundle/integrity.mjs audit catalog > "$RUNNER_TEMP/audit.json"
+          status=$?
+          {
+            echo "## Catalog integrity"
+            echo
+            echo "Checked folders: $(jq -r '.checked | if length == 0 then "none" else join(", ") end' "$RUNNER_TEMP/audit.json")"
+            echo
+            jq -r '.errors[] | "- ❌ \(.plugin // "catalog"): \(.rule)\(if .detail then " (\(.detail))" else "" end)"' "$RUNNER_TEMP/audit.json"
+            jq -r '.warnings[] | "- ⚠️ \(.plugin): \(.rule) (\(.detail))"' "$RUNNER_TEMP/audit.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.errors[] | "::error::\(.plugin // "catalog"): \(.rule)\(if .detail then " (\(.detail))" else "" end)"' "$RUNNER_TEMP/audit.json"
+          jq -r '.warnings[] | "::warning::\(.plugin): \(.rule) (\(.detail))"' "$RUNNER_TEMP/audit.json"
+          exit "$status"
+
+  reclassify:
+    name: Remove reclassified plugins
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Read ip-releaser App PEM from 1Password
+        id: pem
+        uses: Integral-Productivity/reusable-workflows/.github/actions/read-pem-from-1p@cacdc8f4e0bad8d079da06688f6275c3a0ae7a85 # main 2026-10-22
+        with:
+          op-service-account-token: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
+          item-path: op://ip-automation-public/ip-releaser/private_key
+
+      - name: Generate a read-only ip-releaser token for the org
+        id: read-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+          owner: ${{ env.CATALOG_OWNER }}
+          permission-contents: read
+
+      - name: Checkout the catalog
+        uses: actions/checkout@v6
+        with:
+          path: catalog
+          persist-credentials: false
+
+      - name: Checkout public-bundle scripts
+        uses: actions/checkout@v6
+        with:
+          repository: Integral-Productivity/reusable-workflows
+          ref: v1
+          path: rw
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Read each source repo's classification
+        id: decide
+        env:
+          GH_TOKEN: ${{ steps.read-token.outputs.token }}
+          CATALOG: ${{ inputs.catalog }}
+        run: |
+          set -euo pipefail
+          r="$(node rw/scripts/public-bundle/integrity.mjs reclassify catalog --catalog "$CATALOG")"
+          echo "$r" | jq .
+          {
+            echo "remove=$(jq -c '.remove' <<< "$r")"
+            echo "unreadable=$(jq -c '.unreadable' <<< "$r")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate an ip-releaser token for this catalog
+        id: write-token
+        if: steps.decide.outputs.remove != '[]'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.IP_RELEASER_APP_CLIENT_ID }}
+          private-key: ${{ steps.pem.outputs.private-key }}
+          owner: ${{ env.CATALOG_OWNER }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Remove folders and open the pull request
+        if: steps.decide.outputs.remove != '[]'
+        env:
+          GH_TOKEN: ${{ steps.write-token.outputs.token }}
+          APP_SLUG: ${{ steps.write-token.outputs.app-slug }}
+          REMOVE: ${{ steps.decide.outputs.remove }}
+        run: |
+          set -euo pipefail
+          publish="$GITHUB_WORKSPACE/rw/scripts/public-bundle/publish.mjs"
+          cd catalog
+          base="$(git rev-parse --abbrev-ref HEAD)"
+          for name in $(jq -r '.[].plugin' <<< "$REMOVE"); do
+            node "$publish" remove --catalog . --name "$name"
+          done
+          git add -A
+          if git diff --cached --quiet; then echo "Nothing to remove."; exit 0; fi
+          bot_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          branch="claude/unpublish-reclassified"
+          title="chore: remove $(jq -r '[.[].plugin] | join(", ")' <<< "$REMOVE")"
+          git switch --quiet -C "$branch"
+          git commit --quiet -m "$title" -m "Their source repos are no longer classified public for this catalog."
+          git push --quiet --force origin "$branch"
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url // ""')"
+          if [ -z "$pr" ]; then
+            {
+              echo "The weekly integrity check found public copies whose source repo is no longer classified public for this catalog:"
+              echo
+              jq -r '.[] | "- `\(.plugin)` from `\(.sourceRepo)`: \(.reason)"' <<< "$REMOVE"
+            } > "$RUNNER_TEMP/body.md"
+            pr="$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$base" --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md")"
+          fi
+          echo "Pull request: $pr" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on a source that could not be read
+        if: steps.decide.outputs.unreadable != '[]'
+        env:
+          UNREADABLE: ${{ steps.decide.outputs.unreadable }}
+        run: |
+          jq -r '.[] | "::error::\(.plugin): could not read \(.sourceRepo); its folder was kept."' <<< "$UNREADABLE"
+          exit 1
