@@ -1,4 +1,4 @@
-# Reusable catalog integrity check for a public plugin catalog.
+# Reusable catalog integrity check for a plugin catalog, public or private.
 #
 # Proves that every `./plugins/<name>` folder in the catalog carries a passing
 # receipt from the publish workflow, that no file changed after the check, and
@@ -9,6 +9,11 @@
 #
 # Entries with another source (the `github` entries in marketplace-labs-public)
 # have no receipt. They only warn, and never fail the check.
+#
+# The private catalogs (marketplace-internal, marketplace-labs) call it with
+# `catalog: private`. They list source repos, not folders, so the audit
+# mostly warns, but a `./plugins/` folder added there must still carry a
+# receipt. The reclassify job never runs for them: they are not public.
 #
 # A thin caller in each public catalog repo:
 #
@@ -26,7 +31,7 @@
 #     integrity:
 #       uses: Integral-Productivity/reusable-workflows/.github/workflows/reusable-catalog-integrity.yml@v1
 #       with:
-#         catalog: labs        # or core
+#         catalog: labs        # or core, or private
 #       secrets:
 #         OP_RELEASER_PUBLIC_TOKEN: ${{ secrets.OP_RELEASER_PUBLIC_TOKEN }}
 #
@@ -35,7 +40,7 @@
 #   audit        every event. Read only. Fails on any error from integrity.mjs
 #                and writes the errors and warnings to the step summary. Make
 #                its check, "Catalog integrity", required on main.
-#   reclassify   schedule and manual runs only. Reads each source repo's
+#   reclassify   schedule and manual runs on a public catalog only. Reads each source repo's
 #                classification with a read-only ip-releaser token for the org,
 #                and opens one removal pull request on branch
 #                `claude/unpublish-reclassified`, which the catalog's
@@ -55,7 +60,7 @@ on:
   workflow_call:
     inputs:
       catalog:
-        description: 'Which public catalog this is: core (marketplace) or labs (marketplace-labs-public).'
+        description: 'Which catalog this is: core (marketplace), labs (marketplace-labs-public), or private (marketplace-internal, marketplace-labs).'
         type: string
         required: true
     secrets:
@@ -81,8 +86,8 @@ jobs:
           CATALOG: ${{ inputs.catalog }}
         run: |
           case "$CATALOG" in
-            core|labs) ;;
-            *) echo "::error::catalog must be core or labs, not '$CATALOG'." >&2; exit 1 ;;
+            core|labs|private) ;;
+            *) echo "::error::catalog must be core, labs or private, not '$CATALOG'." >&2; exit 1 ;;
           esac
 
       - name: Checkout the catalog
@@ -122,7 +127,7 @@ jobs:
 
   reclassify:
     name: Remove reclassified plugins
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.catalog != 'private'
     needs: audit
     runs-on: ubuntu-latest
     permissions:
