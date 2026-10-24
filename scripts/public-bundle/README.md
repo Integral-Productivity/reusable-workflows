@@ -75,7 +75,8 @@ and the rules for each job.
 ## The catalog integrity workflow
 
 `.github/workflows/reusable-catalog-integrity.yml` runs `integrity.mjs` in each
-public catalog on every pull request, every push to `main` and weekly. The weekly
-run also opens a removal pull request for reclassified plugins. A source repo it
+catalog on every pull request, every push to `main` and weekly. The private
+catalogs use `catalog: private`, which runs the audit only. On a public catalog the
+weekly run also opens a removal pull request for reclassified plugins. A source repo it
 cannot read is never removed; the run fails instead. The workflow header holds the
 caller.
